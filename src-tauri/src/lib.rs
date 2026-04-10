@@ -1,24 +1,27 @@
-use std::sync::Mutex;
+use std::{
+    sync::{Condvar, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent,
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
+const MAIN_WEBVIEW_LABEL: &str = "main";
 const TARGET_WEBVIEW_LABEL: &str = "target-webview";
 const DEFAULT_TARGET_URL: &str = "https://developer.mozilla.org/en-US/docs/Web/API/WebView";
-const MIN_LEFT_PANEL_WIDTH: f64 = 320.0;
+const MIN_WINDOW_WIDTH: f64 = 1068.0;
+const MIN_ASSISTANT_PANEL_WIDTH: f64 = 320.0;
 const MIN_TARGET_PANEL_WIDTH: f64 = 320.0;
-const DEFAULT_LEFT_PANEL_RATIO: f64 = 0.5;
-const MIN_LEFT_PANEL_RATIO: f64 = 0.3;
-const MAX_LEFT_PANEL_RATIO: f64 = 0.7;
 
 struct BrowserState {
     current_url: Mutex<String>,
     loading: Mutex<bool>,
-    left_panel_ratio: Mutex<f64>,
+    layout_preset: Mutex<LayoutPreset>,
+    page_title: Mutex<String>,
 }
 
 impl Default for BrowserState {
@@ -26,7 +29,57 @@ impl Default for BrowserState {
         Self {
             current_url: Mutex::new(DEFAULT_TARGET_URL.to_string()),
             loading: Mutex::new(false),
-            left_panel_ratio: Mutex::new(DEFAULT_LEFT_PANEL_RATIO),
+            layout_preset: Mutex::new(LayoutPreset::default()),
+            page_title: Mutex::new(String::new()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SnapshotCaptureState {
+    sequence: Mutex<u64>,
+    pending: Mutex<PendingSnapshot>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct PendingSnapshot {
+    request_id: Option<String>,
+    response: Option<TargetPageSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+enum LayoutPreset {
+    #[default]
+    #[serde(rename = "50-50")]
+    Split50_50,
+    #[serde(rename = "70-30")]
+    Split70_30,
+    #[serde(rename = "30-70")]
+    Split30_70,
+}
+
+impl LayoutPreset {
+    fn left_ratio(self) -> f64 {
+        match self {
+            Self::Split70_30 => 0.7,
+            Self::Split50_50 => 0.5,
+            Self::Split30_70 => 0.3,
+        }
+    }
+}
+
+impl std::str::FromStr for LayoutPreset {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "70-30" => Ok(Self::Split70_30),
+            "50-50" => Ok(Self::Split50_50),
+            "30-70" => Ok(Self::Split30_70),
+            _ => Err(AppError::Message(format!(
+                "Unsupported layout preset '{value}'. Choose 70-30, 50-50, or 30-70."
+            ))),
         }
     }
 }
@@ -37,7 +90,21 @@ struct TargetBrowserState {
     current_url: String,
     requested_url: String,
     loading: bool,
-    left_panel_ratio: f64,
+    layout_preset: LayoutPreset,
+    page_title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetPageSnapshot {
+    url: String,
+    title: String,
+    loading: bool,
+    captured_at: String,
+    visible_text: String,
+    headings: Vec<String>,
+    interactive_labels: Vec<String>,
+    extraction_error: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -59,8 +126,20 @@ impl Serialize for AppError {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PaneLayout {
+    assistant_position: LogicalPosition<f64>,
+    assistant_size: LogicalSize<f64>,
+    target_position: LogicalPosition<f64>,
+    target_size: LogicalSize<f64>,
+}
+
 #[tauri::command]
-fn navigate_target(url: String, app: AppHandle, state: State<'_, BrowserState>) -> Result<TargetBrowserState, AppError> {
+fn navigate_target(
+    url: String,
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
     let parsed_url = normalize_url(&url)?;
     let webview = app
         .get_webview(TARGET_WEBVIEW_LABEL)
@@ -78,6 +157,11 @@ fn navigate_target(url: String, app: AppHandle, state: State<'_, BrowserState>) 
         *current_url = normalized.clone();
     }
 
+    {
+        let mut page_title = state.page_title.lock().unwrap();
+        page_title.clear();
+    }
+
     webview.navigate(parsed_url)?;
 
     let payload = snapshot_state(&state, normalized)?;
@@ -92,19 +176,95 @@ fn get_target_browser_state(state: State<'_, BrowserState>) -> Result<TargetBrow
 }
 
 #[tauri::command]
-fn set_left_panel_ratio(
-    ratio: f64,
+fn get_target_page_snapshot(
+    app: AppHandle,
+    browser_state: State<'_, BrowserState>,
+    capture_state: State<'_, SnapshotCaptureState>,
+) -> Result<TargetPageSnapshot, AppError> {
+    let webview = app
+        .get_webview(TARGET_WEBVIEW_LABEL)
+        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))?;
+
+    let request_id = {
+        let mut sequence = capture_state.sequence.lock().unwrap();
+        *sequence += 1;
+        format!("snapshot-{}", *sequence)
+    };
+
+    {
+        let mut pending = capture_state.pending.lock().unwrap();
+        pending.request_id = Some(request_id.clone());
+        pending.response = None;
+    }
+
+    webview.eval(build_snapshot_script(&request_id)?)?;
+
+    let pending = capture_state.pending.lock().unwrap();
+    let (mut pending, _) = capture_state
+        .ready
+        .wait_timeout_while(pending, Duration::from_millis(1_500), |pending| {
+            pending.request_id.as_deref() == Some(request_id.as_str()) && pending.response.is_none()
+        })
+        .map_err(|_| AppError::Message("Waiting for the page snapshot failed.".into()))?;
+
+    let snapshot = pending
+        .response
+        .clone()
+        .unwrap_or_else(|| fallback_snapshot(&browser_state, Some("Page inspection timed out.".into())));
+
+    pending.request_id = None;
+    pending.response = None;
+    drop(pending);
+
+    {
+        let mut page_title = browser_state.page_title.lock().unwrap();
+        *page_title = snapshot.title.clone();
+    }
+
+    let requested_url = browser_state.current_url.lock().unwrap().clone();
+    app.emit(
+        "target-browser://state-changed",
+        snapshot_state(&browser_state, requested_url)?,
+    )?;
+
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn submit_page_snapshot(
+    request_id: String,
+    snapshot: TargetPageSnapshot,
+    capture_state: State<'_, SnapshotCaptureState>,
+    browser_state: State<'_, BrowserState>,
+) -> Result<(), AppError> {
+    {
+        let mut page_title = browser_state.page_title.lock().unwrap();
+        *page_title = snapshot.title.clone();
+    }
+
+    let mut pending = capture_state.pending.lock().unwrap();
+    if pending.request_id.as_deref() == Some(request_id.as_str()) {
+        pending.response = Some(snapshot);
+        capture_state.ready.notify_all();
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn set_layout_preset(
+    preset: String,
     app: AppHandle,
     state: State<'_, BrowserState>,
 ) -> Result<TargetBrowserState, AppError> {
-    let normalized_ratio = ratio.clamp(MIN_LEFT_PANEL_RATIO, MAX_LEFT_PANEL_RATIO);
+    let next_preset = preset.parse::<LayoutPreset>()?;
 
     {
-        let mut current_ratio = state.left_panel_ratio.lock().unwrap();
-        *current_ratio = normalized_ratio;
+        let mut current_preset = state.layout_preset.lock().unwrap();
+        *current_preset = next_preset;
     }
 
-    update_target_webview_layout(&app)?;
+    update_webview_layouts(&app)?;
 
     let requested_url = state.current_url.lock().unwrap().clone();
     let payload = snapshot_state(&state, requested_url)?;
@@ -116,6 +276,7 @@ fn set_left_panel_ratio(
 pub fn run() {
     tauri::Builder::default()
         .manage(BrowserState::default())
+        .manage(SnapshotCaptureState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             create_target_webview(app.handle())?;
@@ -124,7 +285,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             navigate_target,
             get_target_browser_state,
-            set_left_panel_ratio
+            get_target_page_snapshot,
+            submit_page_snapshot,
+            set_layout_preset
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -157,6 +320,12 @@ fn create_target_webview(app: &AppHandle) -> Result<(), AppError> {
                 *state_url = current_url.clone();
             }
 
+            if loading {
+                if let Ok(mut page_title) = state.page_title.lock() {
+                    page_title.clear();
+                }
+            }
+
             if let Ok(snapshot) = snapshot_state(&state, current_url) {
                 let _ = page_events.emit("target-browser://state-changed", snapshot);
             }
@@ -164,51 +333,86 @@ fn create_target_webview(app: &AppHandle) -> Result<(), AppError> {
     });
 
     let state = app.state::<BrowserState>();
-    let (_, target_position, target_size) = layout_for_window(&main_window, &state)?;
-    main_window.add_child(builder, target_position, target_size)?;
+    let layout = layout_for_window(&main_window, &state)?;
+    main_window.add_child(builder, layout.target_position, layout.target_size)?;
 
     let resize_handle = app.clone();
     main_window.on_window_event(move |event| {
         if matches!(event, WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }) {
-            let _ = update_target_webview_layout(&resize_handle);
+            let _ = update_webview_layouts(&resize_handle);
         }
     });
 
-    update_target_webview_layout(app)?;
+    update_webview_layouts(app)?;
     Ok(())
 }
 
-fn update_target_webview_layout(app: &AppHandle) -> Result<(), AppError> {
+fn update_webview_layouts(app: &AppHandle) -> Result<(), AppError> {
     let main_window = app
         .get_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| AppError::Message("Main window was not found.".into()))?;
+    let assistant_webview = app
+        .get_webview(MAIN_WEBVIEW_LABEL)
+        .ok_or_else(|| AppError::Message("Assistant webview was not found.".into()))?;
     let target_webview = app
         .get_webview(TARGET_WEBVIEW_LABEL)
         .ok_or_else(|| AppError::Message("Target webview was not found.".into()))?;
 
     let state = app.state::<BrowserState>();
-    let (_, target_position, target_size) = layout_for_window(&main_window, &state)?;
-    target_webview.set_position(target_position)?;
-    target_webview.set_size(target_size)?;
+    let layout = layout_for_window(&main_window, &state)?;
+
+    assistant_webview.set_position(layout.assistant_position)?;
+    assistant_webview.set_size(layout.assistant_size)?;
+    target_webview.set_position(layout.target_position)?;
+    target_webview.set_size(layout.target_size)?;
     Ok(())
 }
 
 fn layout_for_window(
     window: &tauri::Window,
     state: &BrowserState,
-) -> Result<(f64, LogicalPosition<f64>, LogicalSize<f64>), AppError> {
+) -> Result<PaneLayout, AppError> {
     let scale_factor = window.scale_factor()?;
     let inner_size = window.inner_size()?.to_logical::<f64>(scale_factor);
-    let left_panel_ratio = *state.left_panel_ratio.lock().unwrap();
+    let layout_preset = *state.layout_preset.lock().unwrap();
 
-    let left_panel_width = (inner_size.width * left_panel_ratio)
-        .max(MIN_LEFT_PANEL_WIDTH)
-        .min(inner_size.width - MIN_TARGET_PANEL_WIDTH);
-    let target_width = (inner_size.width - left_panel_width).max(MIN_TARGET_PANEL_WIDTH);
-    let target_position = LogicalPosition::new(left_panel_width, 0.0);
-    let target_size = LogicalSize::new(target_width, inner_size.height);
+    layout_for_size(inner_size, layout_preset)
+}
 
-    Ok((left_panel_width, target_position, target_size))
+fn layout_for_size(
+    inner_size: LogicalSize<f64>,
+    layout_preset: LayoutPreset,
+) -> Result<PaneLayout, AppError> {
+    if inner_size.width < MIN_WINDOW_WIDTH {
+        return Err(AppError::Message(
+            "Window is too narrow for the configured split presets.".into(),
+        ));
+    }
+
+    let assistant_width = inner_size.width * layout_preset.left_ratio();
+    let target_width = inner_size.width - assistant_width;
+
+    if assistant_width < MIN_ASSISTANT_PANEL_WIDTH || target_width < MIN_TARGET_PANEL_WIDTH {
+        return Err(AppError::Message(
+            "Window is too narrow to keep both panes visible.".into(),
+        ));
+    }
+
+    Ok(PaneLayout {
+        assistant_position: LogicalPosition::new(0.0, 0.0),
+        assistant_size: LogicalSize::new(assistant_width, inner_size.height),
+        target_position: LogicalPosition::new(assistant_width, 0.0),
+        target_size: LogicalSize::new(target_width, inner_size.height),
+    })
+}
+
+#[cfg(test)]
+fn assert_close(actual: f64, expected: f64, label: &str) {
+    let delta = (actual - expected).abs();
+    assert!(
+        delta < 0.001,
+        "{label} mismatch: expected {expected}, got {actual} (delta {delta})"
+    );
 }
 
 fn normalize_url(value: &str) -> Result<Url, AppError> {
@@ -232,6 +436,215 @@ fn snapshot_state(
         current_url: state.current_url.lock().unwrap().clone(),
         requested_url,
         loading: *state.loading.lock().unwrap(),
-        left_panel_ratio: *state.left_panel_ratio.lock().unwrap(),
+        layout_preset: *state.layout_preset.lock().unwrap(),
+        page_title: state.page_title.lock().unwrap().clone(),
     })
+}
+
+fn fallback_snapshot(state: &BrowserState, extraction_error: Option<String>) -> TargetPageSnapshot {
+    TargetPageSnapshot {
+        url: state.current_url.lock().unwrap().clone(),
+        title: state.page_title.lock().unwrap().clone(),
+        loading: *state.loading.lock().unwrap(),
+        captured_at: unix_timestamp(),
+        visible_text: String::new(),
+        headings: Vec::new(),
+        interactive_labels: Vec::new(),
+        extraction_error,
+    }
+}
+
+fn build_snapshot_script(request_id: &str) -> Result<String, AppError> {
+    let request_id =
+        serde_json::to_string(request_id).map_err(|error| AppError::Message(error.to_string()))?;
+
+    Ok(format!(
+        r#"
+          (() => {{
+            const requestId = {request_id};
+            const invoke = window.__TAURI_INTERNALS__?.invoke;
+
+            const normalizeText = (value, maxLength) =>
+              (value ?? "")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, maxLength);
+
+            const isVisible = (element) => {{
+              if (!(element instanceof HTMLElement)) {{
+                return false;
+              }}
+
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            }};
+
+            const dedupe = (values, maxItems) => {{
+              const unique = [];
+              for (const value of values) {{
+                if (value && !unique.includes(value)) {{
+                  unique.push(value);
+                }}
+                if (unique.length >= maxItems) {{
+                  break;
+                }}
+              }}
+              return unique;
+            }};
+
+            const collectInteractiveLabels = () => {{
+              const selectors = [
+                "button",
+                "a[href]",
+                "input",
+                "textarea",
+                "select",
+                "[role='button']",
+              ];
+
+              return dedupe(
+                Array.from(document.querySelectorAll(selectors.join(",")))
+                  .filter(isVisible)
+                  .map((element) =>
+                    normalizeText(
+                      element.getAttribute("aria-label") ||
+                        element.getAttribute("title") ||
+                        element.innerText ||
+                        element.textContent ||
+                        element.getAttribute("value") ||
+                        element.getAttribute("placeholder"),
+                      120,
+                    ),
+                  )
+                  .filter(Boolean),
+                24,
+              );
+            }};
+
+            const snapshot = {{
+              url: window.location.href,
+              title: document.title || "",
+              loading: document.readyState !== "complete",
+              capturedAt: new Date().toISOString(),
+              visibleText: normalizeText(document.body?.innerText || document.body?.textContent || "", 6000),
+              headings: dedupe(
+                Array.from(document.querySelectorAll("h1, h2, h3"))
+                  .filter(isVisible)
+                  .map((element) => normalizeText(element.textContent, 160))
+                  .filter(Boolean),
+                12,
+              ),
+              interactiveLabels: collectInteractiveLabels(),
+              extractionError: null,
+            }};
+
+            if (typeof invoke !== "function") {{
+              return;
+            }}
+
+            invoke("submit_page_snapshot", {{ requestId, snapshot }}).catch(async (error) => {{
+              const fallbackSnapshot = {{
+                url: window.location.href,
+                title: document.title || "",
+                loading: document.readyState !== "complete",
+                capturedAt: new Date().toISOString(),
+                visibleText: "",
+                headings: [],
+                interactiveLabels: [],
+                extractionError: String(error),
+              }};
+
+              try {{
+                await invoke("submit_page_snapshot", {{ requestId, snapshot: fallbackSnapshot }});
+              }} catch (_ignored) {{}}
+            }});
+          }})();
+        "#
+    ))
+}
+
+fn unix_timestamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computes_70_30_layout_for_standard_window() {
+        let layout =
+            layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split70_30).unwrap();
+
+        assert_close(layout.assistant_position.x, 0.0, "assistant x");
+        assert_close(layout.assistant_size.width, 896.0, "assistant width");
+        assert_close(layout.target_position.x, 896.0, "target x");
+        assert_close(layout.target_size.width, 384.0, "target width");
+        assert_close(layout.assistant_size.height, 820.0, "assistant height");
+        assert_close(layout.target_size.height, 820.0, "target height");
+    }
+
+    #[test]
+    fn computes_50_50_layout_for_standard_window() {
+        let layout =
+            layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split50_50).unwrap();
+
+        assert_close(layout.assistant_size.width, 640.0, "assistant width");
+        assert_close(layout.target_position.x, 640.0, "target x");
+        assert_close(layout.target_size.width, 640.0, "target width");
+    }
+
+    #[test]
+    fn computes_30_70_layout_for_standard_window() {
+        let layout =
+            layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split30_70).unwrap();
+
+        assert_close(layout.assistant_size.width, 384.0, "assistant width");
+        assert_close(layout.target_position.x, 384.0, "target x");
+        assert_close(layout.target_size.width, 896.0, "target width");
+    }
+
+    #[test]
+    fn keeps_exact_split_at_minimum_width() {
+        let layout =
+            layout_for_size(LogicalSize::new(MIN_WINDOW_WIDTH, 640.0), LayoutPreset::Split30_70)
+                .unwrap();
+
+        assert!(layout.assistant_size.width >= MIN_ASSISTANT_PANEL_WIDTH);
+        assert!(layout.target_size.width >= MIN_TARGET_PANEL_WIDTH);
+        assert_close(
+            layout.assistant_size.width + layout.target_size.width,
+            MIN_WINDOW_WIDTH,
+            "total width",
+        );
+    }
+
+    #[test]
+    fn panes_never_overlap_or_leave_gaps() {
+        let presets = [
+            LayoutPreset::Split70_30,
+            LayoutPreset::Split50_50,
+            LayoutPreset::Split30_70,
+        ];
+
+        for preset in presets {
+            let layout = layout_for_size(LogicalSize::new(1440.0, 900.0), preset).unwrap();
+
+            assert_close(layout.assistant_position.x, 0.0, "assistant x");
+            assert_close(
+                layout.target_position.x,
+                layout.assistant_size.width,
+                "target starts after assistant",
+            );
+            assert_close(
+                layout.assistant_size.width + layout.target_size.width,
+                1440.0,
+                "panes cover full width",
+            );
+        }
+    }
 }
