@@ -174,7 +174,7 @@ function App() {
 
   return (
     <main className="min-h-screen overflow-hidden p-2 md:p-3 lg:p-6">
-      <section className="@container flex min-h-[calc(100vh-1rem)] w-full min-w-0 flex-col gap-4 rounded-[20px] border border-border/80 bg-background/90 p-4 text-foreground shadow-[0_20px_60px_rgba(39,52,68,0.12),inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-[10px] md:min-h-[calc(100vh-1.5rem)] md:rounded-[22px] md:p-5 lg:min-h-[calc(100vh-3rem)] lg:gap-5 lg:rounded-[28px] lg:p-7">
+      <section className="@container flex min-h-[calc(100vh-1rem)] w-full min-w-0 flex-col gap-4 border border-border/80 bg-background/90 p-4 text-foreground shadow-[0_20px_60px_rgba(39,52,68,0.12),inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-[10px] md:min-h-[calc(100vh-1.5rem)] md:d:p-5 lg:min-h-[calc(100vh-3rem)] lg:gap-5 lg:p-7">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h1 className="m-0 text-[1.35rem] leading-none font-semibold tracking-[-0.05em] text-foreground @min-[421px]:text-[1.7rem] lg:text-[2.4rem]">
             Sidekick page chat
@@ -187,7 +187,7 @@ function App() {
             <Select value={provider} onValueChange={(value) => setProvider(value as ChatProvider)}>
               <SelectTrigger
                 id="provider-select"
-                className="h-10 w-[160px] rounded-2xl border-border bg-card px-3 text-foreground"
+                className="h-10 w-[160px] border-border bg-card px-3 text-foreground"
               >
                 <SelectValue placeholder="Choose provider" />
               </SelectTrigger>
@@ -199,9 +199,9 @@ function App() {
           </div>
         </div>
 
-        <Card className="flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
+        <Card className="rounded-none flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
           <CardHeader className="pb-3">
-            <div className="rounded-2xl border border-border bg-muted/40 px-4 py-3">
+            <div className="border border-border bg-muted/40 px-4 py-3">
               <p className="m-0 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-muted-foreground">
                 Current page context
               </p>
@@ -215,14 +215,14 @@ function App() {
           </CardHeader>
 
           <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
-            <div className="flex min-h-[300px] flex-1 flex-col gap-3 overflow-y-auto rounded-[24px] border border-border bg-muted/30 p-3">
+            <div className="flex min-h-[300px] flex-1 flex-col gap-3 overflow-y-auto border border-border bg-muted/30 p-3">
               {messages.map((message) => (
                 <article
                   key={message.id}
                   className={
                     message.role === "assistant"
-                      ? "max-w-[92%] self-start rounded-[22px] rounded-bl-md bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]"
-                      : "max-w-[92%] self-end rounded-[22px] rounded-br-md bg-primary px-4 py-3 text-sm text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.22)]"
+                      ? "max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]"
+                      : "max-w-[92%] self-end bg-primary px-4 py-3 text-sm text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.22)]"
                   }
                 >
                   <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
@@ -240,7 +240,7 @@ function App() {
               ))}
 
               {isResponding ? (
-                <article className="max-w-[92%] self-start rounded-[22px] rounded-bl-md bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]">
+                <article className="max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]">
                   <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
                     <Sparkles className="size-3.5" />
                     Sidekick
@@ -259,7 +259,7 @@ function App() {
               </Label>
               <Textarea
                 id={draftId}
-                className="min-h-28 rounded-[22px] border-border bg-background px-4 py-3 text-foreground"
+                className="rounded-none min-h-28 border-border bg-background px-4 py-3 text-foreground"
                 value={draft}
                 onChange={(event) => setDraft(event.currentTarget.value)}
                 onKeyDown={handleComposerKeyDown}
@@ -273,7 +273,7 @@ function App() {
                 <Button
                   type="submit"
                   size="lg"
-                  className="h-11 rounded-2xl bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                  className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
                   disabled={isResponding || draft.trim().length === 0}
                 >
                   {isResponding ? (
@@ -301,7 +301,7 @@ function App() {
           </CardContent>
         </Card>
 
-        <Card className="border border-border/80 bg-card/85 shadow-sm">
+        <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
           <CardHeader className="pb-0">
             <CardTitle className="text-sm font-semibold text-card-foreground">
               Target Page
@@ -314,7 +314,7 @@ function App() {
               </Label>
               <Input
                 id="target-url"
-                className="h-11 rounded-2xl border-border bg-background text-foreground"
+                className="h-11 border-border bg-background text-foreground rounded-none"
                 value={input}
                 onChange={(event) => setInput(event.currentTarget.value)}
                 placeholder="Enter a URL"
@@ -323,7 +323,7 @@ function App() {
               <Button
                 type="submit"
                 size="lg"
-                className="h-11 rounded-2xl bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
                 disabled={submitting}
               >
                 {submitting ? (
@@ -339,13 +339,13 @@ function App() {
           </CardContent>
         </Card>
 
-        <Card className="border border-border/80 bg-card/85 shadow-sm">
+        <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
           <CardHeader className="pb-0">
             <div className="flex items-center justify-between gap-3">
               <CardTitle className="text-sm font-semibold text-card-foreground">
                 Pane Layout
               </CardTitle>
-              <span className="rounded-full border border-border px-3 py-1 text-xs font-semibold text-muted-foreground">
+              <span className="border border-border px-3 py-1 text-xs font-semibold text-muted-foreground">
                 {LAYOUT_PRESET_LABELS[activeLayoutPreset]}
               </span>
             </div>
@@ -357,7 +357,7 @@ function App() {
                   key={preset}
                   type="button"
                   variant={preset === activeLayoutPreset ? "default" : "outline"}
-                  className="h-11 rounded-2xl text-sm font-semibold"
+                  className="h-11 text-sm font-semibold rounded-none"
                   onClick={() => {
                     void handleLayoutPresetChange(preset);
                   }}

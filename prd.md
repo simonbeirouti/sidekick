@@ -3,6 +3,14 @@
 ## Overview
 Sidekick AI is a persistent student assistant that runs alongside third-party learning websites. It should understand page content, interact with the site when needed, and preserve the student’s context across devices.
 
+## Current Product State
+- Sidekick now runs as a native two-webview desktop workspace inside Tauri.
+- The left webview hosts the assistant interface and the right webview hosts the active target page.
+- The current layout uses exact native split presets of `70/30`, `50/50`, and `30/70` for left/right pane widths.
+- The two panes do not visually overlap and resize together from shared native layout logic.
+- The assistant can currently inspect the active right-side page, extract basic grounded context, and answer chat questions about that page.
+- The assistant shell now has a more consistent visual system built with Tailwind CSS and shadcn/ui primitives, improving UX/UI while preserving the desktop-first architecture.
+
 ## Product Goals
 - Provide an AI companion that works next to educational sites instead of replacing them.
 - Maintain synchronized student memory, chat history, and settings across devices.
@@ -26,18 +34,22 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 
 ### 2. Dual-View Layout Test
 - Launch the desktop shell with the assistant interface on the left and the target site on the right.
-- Change the pane width and resize the window.
-- Success: both panes remain visible in the same window, the right-side webview stays aligned with the layout, and the left pane remains usable across narrow and wide widths.
+- Switch between `70/30`, `50/50`, and `30/70`, then resize the window.
+- Success: both panes remain visible in the same window, no overlap appears, and both webviews stay aligned to the shared native layout bounds.
 
-### 3. Session Recovery Test
+### 3. Grounded Chat Test
+- Open a target page and ask the assistant questions about the visible page content.
+- Success: the assistant returns a useful response grounded in the current page snapshot from the right-side webview.
+
+### 4. Session Recovery Test
 - Log into a target site, force an app crash, and reopen the app.
 - Success: the site session is restored and the AI resumes without requiring the student to log in again.
 
-### 4. CSP / DOM Access Test
+### 5. CSP / DOM Access Test
 - Load a site with strict security policies and attempt to capture useful page context.
 - Success: Sidekick can still extract the required DOM content through the desktop app architecture.
 
-### 5. Frontend System Baseline Test
+### 6. Frontend System Baseline Test
 - Build the assistant UI using Tailwind CSS and shadcn/ui primitives as the default frontend system.
 - Success: the main interface can be composed from the shared design system, global styling stays minimal, and new screens do not require bespoke CSS as the default approach.
 
@@ -47,11 +59,15 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - One webview hosts the Sidekick AI interface.
 - One webview hosts the active third-party learning site.
 - Both must remain visible so the assistant can operate alongside the student’s live browsing session.
+- Layout is controlled natively by Tauri, not by a fake placeholder pane in the frontend.
+- The current supported pane presets are `70/30`, `50/50`, and `30/70` for left/right widths.
 
 ### Page Understanding and Action Layer
 - The system must be able to read the current page state, including visible content, DOM structure, and relevant interactive elements.
 - The system must be able to execute actions against the page, such as clicking, typing, navigating, and extracting updated context after each step.
 - AI behavior should follow a loop of observe, reason, and act so the assistant can respond to the page as it changes.
+- Current implemented slice: observe -> answer. The assistant can capture page state and answer questions grounded in the current right-side page.
+- Next slice: observe -> reason -> act with safe action execution primitives.
 
 ### Authentication
 - Use Supabase Auth with OTP or OAuth.
@@ -83,7 +99,8 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 ## Technical Requirements
 - Desktop-first architecture with support for at least two embedded webviews in a single window.
 - Shared window layout that keeps the AI interface and target site visible at the same time.
-- Adjustable split layout so the left assistant pane and right target-site pane can be resized while remaining synchronized with the native webview bounds.
+- Native split layout so the left assistant pane and right target-site pane remain synchronized with shared webview bounds.
+- Support exact split presets of `70/30`, `50/50`, and `30/70` with no overlap between panes.
 - A bridge for securely reading page content, DOM state, and interaction targets from the site webview.
 - A bridge for executing page actions in the site webview, including click, type, scroll, and navigation events.
 - An AI runtime capable of turning page observations into next-step actions within the active session.
@@ -104,6 +121,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Sensitive credentials never become accessible to page-level JavaScript.
 - Target-site sessions can be restored reliably enough for real-world study flows.
 - Sidekick can recover from blocked interactions by handing off to the student on another device.
+- Sidekick can answer questions about the live target page using grounded page context captured from that same session.
 - Sidekick can see the live state of the target page and execute actions in that same session without breaking the side-by-side experience.
-- Sidekick presents a stable dual-view shell where both panes remain usable and visually aligned as the window and pane widths change.
+- Sidekick presents a stable dual-view shell where both panes remain usable, visually aligned, and non-overlapping as the window and pane presets change.
 - The frontend can be extended using Tailwind and shadcn/ui as the default system instead of relying on custom page-specific CSS for each new screen.
