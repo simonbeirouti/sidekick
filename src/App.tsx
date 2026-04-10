@@ -1,35 +1,58 @@
-import { FormEvent, useEffect, useState, type CSSProperties } from "react";
-import { AlertCircle, LoaderCircle } from "lucide-react";
+import { FormEvent, KeyboardEvent, useEffect, useId, useState } from "react";
+import { AlertCircle, LoaderCircle, SendHorizontal, Sparkles } from "lucide-react";
 
+import { sendAgentMessage, type ChatMessage } from "@/lib/agentChat";
+import { type ChatProvider } from "@/lib/chatModel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Separator } from "@/components/ui/separator";
-import { Slider } from "@/components/ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 
 import {
   getTargetBrowserState,
+  LAYOUT_PRESETS,
   listenToTargetBrowser,
   navigateTarget,
-  setLeftPanelRatio,
+  setLayoutPreset,
+  type LayoutPreset,
   type TargetBrowserState,
 } from "./lib/targetBrowser";
+
+const DEFAULT_PROVIDER = (import.meta.env.VITE_LLM_PROVIDER ?? "openai") as ChatProvider;
+const LAYOUT_PRESET_LABELS: Record<LayoutPreset, string> = {
+  "70-30": "70/30",
+  "50-50": "50/50",
+  "30-70": "30/70",
+};
 
 function App() {
   const [browser, setBrowser] = useState<TargetBrowserState | null>(null);
   const [input, setInput] = useState("https://developer.mozilla.org");
+  const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
+  const [agentError, setAgentError] = useState("");
+  const [provider, setProvider] = useState<ChatProvider>(DEFAULT_PROVIDER);
   const [submitting, setSubmitting] = useState(false);
-  const leftPanelPercent = Math.round((browser?.leftPanelRatio ?? 0.5) * 100);
+  const [isResponding, setIsResponding] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "assistant-intro",
+      role: "assistant",
+      content:
+        "Ask me about the page on the right and I’ll answer using the visible page context.",
+    },
+  ]);
+  const activeLayoutPreset = browser?.layoutPreset ?? "50-50";
+  const draftId = useId();
 
   useEffect(() => {
     let mounted = true;
@@ -83,234 +106,279 @@ function App() {
     }
   }
 
-  async function handlePaneResize(nextPercent: number) {
+  async function handleLayoutPresetChange(nextPreset: LayoutPreset) {
+    if (nextPreset === activeLayoutPreset) {
+      return;
+    }
+
     setError("");
 
     try {
-      const nextState = await setLeftPanelRatio(nextPercent / 100);
+      const nextState = await setLayoutPreset(nextPreset);
       setBrowser(nextState);
     } catch (resizeError) {
       setError(getErrorMessage(resizeError));
     }
   }
 
-  return (
-    <main
-      className="grid min-h-screen gap-0 overflow-hidden p-2 md:p-3 lg:p-6"
-      style={
-        {
-          gridTemplateColumns: `minmax(320px, ${leftPanelPercent}%) minmax(320px, 1fr)`,
-        } as CSSProperties
-      }
-    >
-      <section className="min-w-0 pr-1 md:pr-2 lg:pr-3">
-        <section className="@container flex min-h-[calc(100vh-1rem)] w-full flex-col gap-4 rounded-[20px] border border-black/8 bg-[rgba(255,252,247,0.9)] p-4 shadow-[0_20px_60px_rgba(39,52,68,0.12),inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-[10px] md:min-h-[calc(100vh-1.5rem)] md:rounded-[22px] md:p-5 lg:min-h-[calc(100vh-3rem)] lg:gap-5 lg:rounded-[28px] lg:p-7">
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <Badge
-                variant="outline"
-                className="rounded-full border-[#52614d]/20 bg-[#eef4ea] px-3 py-1 text-[0.7rem] uppercase tracking-[0.18em] text-[#52614d]"
-              >
-                Sidekick Shell
-              </Badge>
-              <Badge
-                variant="secondary"
-                className="rounded-full bg-white/80 px-3 py-1 text-[0.72rem] font-semibold text-[#3f5146]"
-              >
-                v1 shell
-              </Badge>
-            </div>
+  async function submitDraft(nextDraft: string) {
+    if (!nextDraft || isResponding) {
+      return;
+    }
 
-            <div className="space-y-2">
-              <h1 className="m-0 text-[1.35rem] leading-none font-semibold tracking-[-0.05em] text-[#171717] @min-[421px]:text-[1.7rem] lg:text-[2.4rem]">
-                Dual-webview workspace
-              </h1>
-              <p className="m-0 max-w-2xl text-[0.88rem] text-[#46515b] @min-[421px]:text-[0.94rem] lg:text-base">
-                The left side is our React control surface. The right side is a native
-                Tauri webview that can be pointed at any learning site we want to work
-                alongside.
+    setAgentError("");
+    setDraft("");
+    setIsResponding(true);
+
+    const userMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: nextDraft,
+    };
+
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+
+    try {
+      const response = await sendAgentMessage(nextMessages, provider);
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: response,
+        },
+      ]);
+    } catch (chatError) {
+      setAgentError(getErrorMessage(chatError));
+      setMessages((currentMessages) =>
+        currentMessages.filter((message) => message.id !== userMessage.id),
+      );
+      setDraft(nextDraft);
+    } finally {
+      setIsResponding(false);
+    }
+  }
+
+  async function handleChatSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await submitDraft(draft.trim());
+  }
+
+  function handleComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitDraft(draft.trim());
+    }
+  }
+
+  return (
+    <main className="min-h-screen overflow-hidden p-2 md:p-3 lg:p-6">
+      <section className="@container flex min-h-[calc(100vh-1rem)] w-full min-w-0 flex-col gap-4 rounded-[20px] border border-border/80 bg-background/90 p-4 text-foreground shadow-[0_20px_60px_rgba(39,52,68,0.12),inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-[10px] md:min-h-[calc(100vh-1.5rem)] md:rounded-[22px] md:p-5 lg:min-h-[calc(100vh-3rem)] lg:gap-5 lg:rounded-[28px] lg:p-7">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="m-0 text-[1.35rem] leading-none font-semibold tracking-[-0.05em] text-foreground @min-[421px]:text-[1.7rem] lg:text-[2.4rem]">
+            Sidekick page chat
+          </h1>
+
+          <div className="flex min-w-[220px] items-center gap-2">
+            <Label htmlFor="provider-select" className="text-sm font-medium text-muted-foreground">
+              Provider
+            </Label>
+            <Select value={provider} onValueChange={(value) => setProvider(value as ChatProvider)}>
+              <SelectTrigger
+                id="provider-select"
+                className="h-10 w-[160px] rounded-2xl border-border bg-card px-3 text-foreground"
+              >
+                <SelectValue placeholder="Choose provider" />
+              </SelectTrigger>
+              <SelectContent className="bg-popover">
+                <SelectItem value="openai">OpenAI</SelectItem>
+                <SelectItem value="ollama">Ollama</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+
+        <Card className="flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
+          <CardHeader className="pb-3">
+            <div className="rounded-2xl border border-border bg-muted/40 px-4 py-3">
+              <p className="m-0 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-muted-foreground">
+                Current page context
+              </p>
+              <p className="mt-1 text-sm font-semibold text-card-foreground">
+                {browser?.pageTitle || "Page title will appear after the first inspection"}
+              </p>
+              <p className="mt-1 break-words text-[0.82rem] text-muted-foreground">
+                {browser?.currentUrl ?? "Waiting for the native webview to load"}
               </p>
             </div>
-          </div>
+          </CardHeader>
 
-          <Card className="border border-black/6 bg-white/80 shadow-sm">
-            <CardHeader className="pb-0">
-              <CardTitle className="text-sm font-semibold text-[#25313a]">
-                Target Page
-              </CardTitle>
-              <CardDescription>
-                Choose the page we should open in the embedded browser.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-3" onSubmit={handleSubmit}>
-                <Label htmlFor="target-url" className="text-[#52614d]">
-                  URL
-                </Label>
-                <Input
-                  id="target-url"
-                  className="h-11 rounded-2xl border-black/8 bg-white"
-                  value={input}
-                  onChange={(event) => setInput(event.currentTarget.value)}
-                  placeholder="Enter a URL"
-                  autoComplete="off"
-                />
+          <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
+            <div className="flex min-h-[300px] flex-1 flex-col gap-3 overflow-y-auto rounded-[24px] border border-border bg-muted/30 p-3">
+              {messages.map((message) => (
+                <article
+                  key={message.id}
+                  className={
+                    message.role === "assistant"
+                      ? "max-w-[92%] self-start rounded-[22px] rounded-bl-md bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]"
+                      : "max-w-[92%] self-end rounded-[22px] rounded-br-md bg-primary px-4 py-3 text-sm text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.22)]"
+                  }
+                >
+                  <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
+                    {message.role === "assistant" ? (
+                      <>
+                        <Sparkles className="size-3.5" />
+                        Sidekick
+                      </>
+                    ) : (
+                      "You"
+                    )}
+                  </div>
+                  <p className="m-0 whitespace-pre-wrap leading-6">{message.content}</p>
+                </article>
+              ))}
+
+              {isResponding ? (
+                <article className="max-w-[92%] self-start rounded-[22px] rounded-bl-md bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]">
+                  <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
+                    <Sparkles className="size-3.5" />
+                    Sidekick
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <LoaderCircle className="size-4 animate-spin" />
+                    Inspecting the page and drafting a reply
+                  </div>
+                </article>
+              ) : null}
+            </div>
+
+            <form className="grid gap-3" onSubmit={handleChatSubmit}>
+              <Label htmlFor={draftId} className="text-muted-foreground">
+                Ask about what you see on the right
+              </Label>
+              <Textarea
+                id={draftId}
+                className="min-h-28 rounded-[22px] border-border bg-background px-4 py-3 text-foreground"
+                value={draft}
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder="What is this page about? What are the main headings? What should I focus on?"
+                disabled={isResponding}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <p className="m-0 text-xs text-muted-foreground">
+                  Shift+Enter for a new line. Enter to send.
+                </p>
                 <Button
                   type="submit"
                   size="lg"
-                  className="h-11 rounded-2xl bg-[linear-gradient(135deg,#204e4a_0%,#366a5a_100%)] text-sm font-semibold text-[#f7f5ef] shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:opacity-95"
-                  disabled={submitting}
+                  className="h-11 rounded-2xl bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                  disabled={isResponding || draft.trim().length === 0}
                 >
-                  {submitting ? (
+                  {isResponding ? (
                     <>
                       <LoaderCircle className="size-4 animate-spin" />
-                      Loading
+                      Thinking
                     </>
                   ) : (
-                    "Open on right"
+                    <>
+                      <SendHorizontal className="size-4" />
+                      Send
+                    </>
                   )}
                 </Button>
-              </form>
-            </CardContent>
-          </Card>
-
-          <Card className="border border-black/6 bg-white/80 shadow-sm">
-            <CardHeader className="pb-0">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <CardTitle className="text-sm font-semibold text-[#25313a]">
-                    Pane Width
-                  </CardTitle>
-                  <CardDescription>
-                    Adjust how much space the assistant panel occupies.
-                  </CardDescription>
-                </div>
-                <Badge variant="outline" className="rounded-full px-3">
-                  {leftPanelPercent}%
-                </Badge>
               </div>
-            </CardHeader>
-            <CardContent className="pt-1">
-              <Slider
-                value={[leftPanelPercent]}
-                min={30}
-                max={70}
-                step={1}
-                onValueChange={(value) => {
-                  const [next] = Array.isArray(value) ? value : [value];
-                  if (typeof next === "number") {
-                    void handlePaneResize(next);
-                  }
-                }}
+            </form>
+
+            {agentError ? (
+              <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
+                <AlertCircle className="size-4" />
+                <AlertTitle>Couldn&apos;t get a grounded answer</AlertTitle>
+                <AlertDescription>{agentError}</AlertDescription>
+              </Alert>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="border border-border/80 bg-card/85 shadow-sm">
+          <CardHeader className="pb-0">
+            <CardTitle className="text-sm font-semibold text-card-foreground">
+              Target Page
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <form className="grid gap-3" onSubmit={handleSubmit}>
+              <Label htmlFor="target-url" className="text-muted-foreground">
+                URL
+              </Label>
+              <Input
+                id="target-url"
+                className="h-11 rounded-2xl border-border bg-background text-foreground"
+                value={input}
+                onChange={(event) => setInput(event.currentTarget.value)}
+                placeholder="Enter a URL"
+                autoComplete="off"
               />
-            </CardContent>
-          </Card>
-
-          <div className="grid grid-cols-1 gap-2 @min-[421px]:grid-cols-2 lg:grid-cols-3">
-            {[
-              "https://developer.mozilla.org",
-              "https://www.wikipedia.org",
-              "https://www.khanacademy.org",
-            ].map((url) => (
               <Button
-                key={url}
-                type="button"
-                variant="secondary"
-                className="h-auto rounded-[18px] border border-[#bdd5c9]/40 bg-[rgba(189,213,201,0.28)] px-3 py-3 text-sm font-semibold text-[#21443f] shadow-none hover:bg-[rgba(189,213,201,0.45)]"
-                onClick={() => {
-                  setInput(url);
-                  setError("");
-                }}
+                type="submit"
+                size="lg"
+                className="h-11 rounded-2xl bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                disabled={submitting}
               >
-                {new URL(url).host.replace("www.", "")}
+                {submitting ? (
+                  <>
+                    <LoaderCircle className="size-4 animate-spin" />
+                    Loading
+                  </>
+                ) : (
+                  "Open on right"
+                )}
               </Button>
-            ))}
-          </div>
+            </form>
+          </CardContent>
+        </Card>
 
-          <Card className="border border-black/6 bg-white/80 shadow-sm">
-            <CardContent className="flex items-center gap-3 pt-4">
-              <Badge
-                variant={browser?.loading ? "default" : "secondary"}
-                className={
-                  browser?.loading
-                    ? "rounded-full bg-[#1f8f68] px-2.5 text-white"
-                    : "rounded-full bg-[#eef2f4] px-2.5 text-[#52616d]"
-                }
-              >
-                {browser?.loading ? "Loading" : "Ready"}
-              </Badge>
-              <div>
-                <p className="m-0 text-[0.74rem] font-bold tracking-[0.03em] text-[#52614d] lg:text-[0.85rem]">
-                  Right-side webview
-                </p>
-                <p className="mt-0.5 text-base font-semibold text-[#171717]">
-                  {browser?.loading ? "Loading a page" : "Connected"}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card className="border border-black/6 bg-white/80 shadow-sm">
-            <CardHeader className="pb-0">
-              <CardTitle className="text-sm font-semibold text-[#25313a]">
-                Session Metadata
+        <Card className="border border-border/80 bg-card/85 shadow-sm">
+          <CardHeader className="pb-0">
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle className="text-sm font-semibold text-card-foreground">
+                Pane Layout
               </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-1.5">
-                <p className="text-[0.74rem] font-bold tracking-[0.03em] text-[#52614d] lg:text-[0.85rem]">
-                  Current URL
-                </p>
-                <p className="break-words text-[0.88rem] text-[#24313c] @min-[421px]:text-[0.94rem] lg:text-base">
-                  {browser?.currentUrl ?? "Starting embedded browser..."}
-                </p>
-              </div>
-              <Separator />
-              <div className="space-y-1.5">
-                <p className="text-[0.74rem] font-bold tracking-[0.03em] text-[#52614d] lg:text-[0.85rem]">
-                  Requested URL
-                </p>
-                <p className="break-words text-[0.88rem] text-[#24313c] @min-[421px]:text-[0.94rem] lg:text-base">
-                  {browser?.requestedUrl ?? "Waiting for input"}
-                </p>
-              </div>
-            </CardContent>
-          </Card>
+              <span className="rounded-full border border-border px-3 py-1 text-xs font-semibold text-muted-foreground">
+                {LAYOUT_PRESET_LABELS[activeLayoutPreset]}
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent className="grid gap-3 pt-3">
+            <div className="grid grid-cols-3 gap-2">
+              {LAYOUT_PRESETS.map((preset) => (
+                <Button
+                  key={preset}
+                  type="button"
+                  variant={preset === activeLayoutPreset ? "default" : "outline"}
+                  className="h-11 rounded-2xl text-sm font-semibold"
+                  onClick={() => {
+                    void handleLayoutPresetChange(preset);
+                  }}
+                >
+                  {LAYOUT_PRESET_LABELS[preset]}
+                </Button>
+              ))}
+            </div>
+            <p className="m-0 text-xs text-muted-foreground">
+              Assistant on the left, target page on the right. Native panes stay flush with no overlap.
+            </p>
+          </CardContent>
+        </Card>
 
-          {error ? (
-            <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
-              <AlertCircle className="size-4" />
-              <AlertTitle>Couldn&apos;t update the embedded browser</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          ) : null}
-
-          <Card className="mt-auto border border-black/6 bg-[linear-gradient(180deg,rgba(235,243,250,0.95),rgba(245,248,240,0.95))] shadow-sm">
-            <CardHeader className="pb-0">
-              <CardTitle className="text-sm font-semibold text-[#25313a]">
-                First Build Milestone
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <ul className="pl-4 text-[0.88rem] text-[#37444f] @min-[421px]:text-[0.94rem] lg:text-base">
-                <li>Two webviews share the same desktop window.</li>
-                <li>The right side can be changed from the left control panel.</li>
-                <li>The backend keeps navigation and page-load state in sync.</li>
-              </ul>
-            </CardContent>
-          </Card>
-        </section>
-      </section>
-
-      <section className="min-w-0 pl-1 md:pl-2 lg:pl-3" aria-hidden="true">
-        <div className="flex min-h-[calc(100vh-1rem)] flex-col justify-end rounded-[20px] bg-[linear-gradient(180deg,rgba(21,28,35,0.92),rgba(18,22,30,0.96))] p-4 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06),0_20px_60px_rgba(9,14,21,0.24)] md:min-h-[calc(100vh-1.5rem)] md:rounded-[22px] md:p-5 lg:min-h-[calc(100vh-3rem)] lg:rounded-[28px] lg:p-6">
-          <p className="mb-1.5 text-[0.78rem] font-bold uppercase tracking-[0.14em] text-[rgba(210,221,229,0.72)]">
-            Embedded Browser
-          </p>
-          <p className="m-0 break-words text-sm text-[#f3f7fb] lg:text-base">
-            {browser?.currentUrl ?? "Waiting for the native webview to load"}
-          </p>
-        </div>
+        {error ? (
+          <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
+            <AlertCircle className="size-4" />
+            <AlertTitle>Couldn&apos;t update the embedded browser</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        ) : null}
       </section>
     </main>
   );

@@ -6,6 +6,20 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #171717;
+  background:
+    radial-gradient(circle at top left, #f3f7ec 0, #f3f7ec 20%, transparent 56%),
+    linear-gradient(180deg, #f7f1e8 0%, #eef3f8 100%);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -38,24 +52,4 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-}
-
-@layer base {
-  html,
-  body,
-  #root {
-    min-height: 100%;
-  }
-
-  body {
-    min-height: 100vh;
-    color: oklch(var(--foreground));
-    background: linear-gradient(180deg, #f7f1e8 0%, #eef3f8 100%);
-    font-family: "Geist Variable", "IBM Plex Sans", "Segoe UI", sans-serif;
-    font-synthesis: none;
-    text-rendering: optimizeLegibility;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    -webkit-text-size-adjust: 100%;
-  }
 }
