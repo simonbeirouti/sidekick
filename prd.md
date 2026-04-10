@@ -24,13 +24,22 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Inject a malicious script into a target-site webview.
 - Success: the script cannot access the Supabase session or JWT because secrets remain in Rust and the system keychain.
 
-### 2. Session Recovery Test
+### 2. Dual-View Layout Test
+- Launch the desktop shell with the assistant interface on the left and the target site on the right.
+- Change the pane width and resize the window.
+- Success: both panes remain visible in the same window, the right-side webview stays aligned with the layout, and the left pane remains usable across narrow and wide widths.
+
+### 3. Session Recovery Test
 - Log into a target site, force an app crash, and reopen the app.
 - Success: the site session is restored and the AI resumes without requiring the student to log in again.
 
-### 3. CSP / DOM Access Test
+### 4. CSP / DOM Access Test
 - Load a site with strict security policies and attempt to capture useful page context.
 - Success: Sidekick can still extract the required DOM content through the desktop app architecture.
+
+### 5. Frontend System Baseline Test
+- Build the assistant UI using Tailwind CSS and shadcn/ui primitives as the default frontend system.
+- Success: the main interface can be composed from the shared design system, global styling stays minimal, and new screens do not require bespoke CSS as the default approach.
 
 ## Core Architecture
 ### Dual-Webview Workspace
@@ -74,6 +83,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 ## Technical Requirements
 - Desktop-first architecture with support for at least two embedded webviews in a single window.
 - Shared window layout that keeps the AI interface and target site visible at the same time.
+- Adjustable split layout so the left assistant pane and right target-site pane can be resized while remaining synchronized with the native webview bounds.
 - A bridge for securely reading page content, DOM state, and interaction targets from the site webview.
 - A bridge for executing page actions in the site webview, including click, type, scroll, and navigation events.
 - An AI runtime capable of turning page observations into next-step actions within the active session.
@@ -81,6 +91,8 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Rust backend with secure local credential storage.
 - Supabase for auth, database, storage, and realtime messaging.
 - Hardware-backed key storage where available.
+- Tailwind CSS as the default frontend styling system.
+- shadcn/ui as the default component baseline for controls, layout primitives, and reusable interface patterns.
 
 ## Open Risks
 - Syncing third-party session state across devices may be brittle across sites.
@@ -93,3 +105,5 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Target-site sessions can be restored reliably enough for real-world study flows.
 - Sidekick can recover from blocked interactions by handing off to the student on another device.
 - Sidekick can see the live state of the target page and execute actions in that same session without breaking the side-by-side experience.
+- Sidekick presents a stable dual-view shell where both panes remain usable and visually aligned as the window and pane widths change.
+- The frontend can be extended using Tailwind and shadcn/ui as the default system instead of relying on custom page-specific CSS for each new screen.

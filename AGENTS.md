@@ -56,3 +56,4 @@ This project builds Sidekick as a desktop-first assistant using Tauri, React, an
 - Prefer event handlers and derived state over effect-driven state synchronization in React.
 - Prefer explicit IPC contracts over ad hoc invoke usage spread across many components.
 - Prefer one clear way of doing something over multiple competing patterns in the same layer.
+- Never push to git automatically. Only push branches or remote updates when the user explicitly asks for it.
