@@ -3335,6 +3335,8 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]
