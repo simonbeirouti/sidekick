@@ -8,7 +8,11 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - The left webview hosts the assistant interface and the right webview hosts the active target page.
 - The current layout uses exact native split presets of `70/30`, `50/50`, and `30/70` for left/right pane widths.
 - The two panes do not visually overlap and resize together from shared native layout logic.
-- The assistant can currently inspect the active right-side page, extract basic grounded context, and answer chat questions about that page.
+- The assistant can inspect the active right-side page, extract grounded context, and answer chat questions about that page.
+- The assistant can now summarize the live page, extract structured interactive elements, and keep responses grounded in either whole-page or focused-asset context.
+- The assistant can execute low-risk page actions against the right-side webview, currently including `click`, `type`, and `scroll`.
+- The assistant supports a manual asset-picking flow so the user can hover and select an element on the right-side page for focused review and lower-token context.
+- The assistant now supports inline human-in-the-loop review cards in chat for sensitive or blocked actions such as login, verification, and CAPTCHA-adjacent flows.
 - The assistant shell now has a more consistent visual system built with Tailwind CSS and shadcn/ui primitives, improving UX/UI while preserving the desktop-first architecture.
 
 ## Product Goals
@@ -22,10 +26,6 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Multi-webview desktop app with one persistent AI interface and one or more target-site webviews.
 - Native Rust backend manages authentication, storage, encryption, and sync.
 - Best fit for security-sensitive session handling because credentials can stay outside the webview JavaScript context.
-
-### Fallbacks
-- Electron: viable if webview orchestration or native integration becomes a blocker.
-- Browser extension: last-resort option if desktop distribution becomes infeasible.
 
 ## Validation Tests
 ### 1. Identity Leak Test
@@ -41,15 +41,27 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Open a target page and ask the assistant questions about the visible page content.
 - Success: the assistant returns a useful response grounded in the current page snapshot from the right-side webview.
 
-### 4. Session Recovery Test
+### 4. Page Interaction Test
+- Open a target page and ask the assistant to perform a safe action such as clicking a visible control, typing into a non-sensitive field, or scrolling.
+- Success: the assistant executes the action inside the active right-side session, refreshes page context, and reports the result back in chat.
+
+### 5. Human Review Test
+- Trigger a login, verification, password, or CAPTCHA-like flow and ask the assistant to continue.
+- Success: the assistant pauses with an inline review card in chat, accepts human approve/edit/reject input, and resumes from that same flow.
+
+### 6. Focused Asset Review Test
+- Enable page picking, hover over an asset or interactive element, select it, and ask the assistant to review it.
+- Success: the assistant uses the focused selection and nearby context instead of defaulting to a full-page summary, reducing unnecessary token usage.
+
+### 7. Session Recovery Test
 - Log into a target site, force an app crash, and reopen the app.
 - Success: the site session is restored and the AI resumes without requiring the student to log in again.
 
-### 5. CSP / DOM Access Test
+### 8. CSP / DOM Access Test
 - Load a site with strict security policies and attempt to capture useful page context.
 - Success: Sidekick can still extract the required DOM content through the desktop app architecture.
 
-### 6. Frontend System Baseline Test
+### 9. Frontend System Baseline Test
 - Build the assistant UI using Tailwind CSS and shadcn/ui primitives as the default frontend system.
 - Success: the main interface can be composed from the shared design system, global styling stays minimal, and new screens do not require bespoke CSS as the default approach.
 
@@ -66,8 +78,9 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - The system must be able to read the current page state, including visible content, DOM structure, and relevant interactive elements.
 - The system must be able to execute actions against the page, such as clicking, typing, navigating, and extracting updated context after each step.
 - AI behavior should follow a loop of observe, reason, and act so the assistant can respond to the page as it changes.
-- Current implemented slice: observe -> answer. The assistant can capture page state and answer questions grounded in the current right-side page.
-- Next slice: observe -> reason -> act with safe action execution primitives.
+- Current implemented slice: observe -> reason -> act for safe interactions. The assistant can capture whole-page state, summarize grounded context, perform `click` / `type` / `scroll` actions, refresh page state after actions, and surface inline review when a human decision is needed.
+- Current implemented focus slice: manual hover-and-pick element selection for focused review, allowing the assistant to reason over a selected asset or UI target instead of sending full-page context by default.
+- Next slice: expand sensitive-flow handling, broader action coverage, richer blocked-state recovery, and more durable cross-device intervention flows.
 
 ### Authentication
 - Use Supabase Auth with OTP or OAuth.
@@ -94,6 +107,9 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 | Student memory | Supabase database | Row updates + fetch on login |
 | Site session | Encrypted storage bundle | Blob upload/download |
 | Page context | Rust bridge from webview | Realtime or direct app state |
+| Page actions | Rust/Tauri action bridge | Direct app state |
+| Focused asset review | Manual page picker + grounded extraction | Direct app state |
+| Human review state | Inline chat workflow + agent checkpointing | Direct app state |
 | User settings | Supabase database | Row updates |
 
 ## Technical Requirements
@@ -103,8 +119,11 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Support exact split presets of `70/30`, `50/50`, and `30/70` with no overlap between panes.
 - A bridge for securely reading page content, DOM state, and interaction targets from the site webview.
 - A bridge for executing page actions in the site webview, including click, type, scroll, and navigation events.
+- Structured page element descriptors so the AI can refer to visible targets deterministically instead of relying only on raw text snapshots.
+- A focused asset selection flow that lets the user hover and pick an element for low-token review and grounded follow-up.
 - An AI runtime capable of turning page observations into next-step actions within the active session.
 - Support for an observe -> reason -> act loop with updated page context after every interaction.
+- Inline human-in-the-loop review for sensitive or blocked actions, including approve, edit, and reject decisions in chat.
 - Rust backend with secure local credential storage.
 - Supabase for auth, database, storage, and realtime messaging.
 - Hardware-backed key storage where available.
@@ -123,5 +142,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Sidekick can recover from blocked interactions by handing off to the student on another device.
 - Sidekick can answer questions about the live target page using grounded page context captured from that same session.
 - Sidekick can see the live state of the target page and execute actions in that same session without breaking the side-by-side experience.
+- Sidekick can narrow its reasoning to a user-selected asset or element on the live page to keep reviews more precise and token-efficient.
+- Sidekick can pause sensitive actions for inline human feedback and continue from the same chat flow with an actionable next step.
 - Sidekick presents a stable dual-view shell where both panes remain usable, visually aligned, and non-overlapping as the window and pane presets change.
 - The frontend can be extended using Tailwind and shadcn/ui as the default system instead of relying on custom page-specific CSS for each new screen.
