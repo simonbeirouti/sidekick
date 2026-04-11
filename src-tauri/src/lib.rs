@@ -11,13 +11,15 @@ use tauri::{
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const MAIN_WEBVIEW_LABEL: &str = "main";
-const TARGET_WEBVIEW_LABEL: &str = "target-webview";
 const DEFAULT_TARGET_URL: &str = "https://developer.mozilla.org/en-US/docs/Web/API/WebView";
 const MIN_WINDOW_WIDTH: f64 = 1068.0;
 const MIN_ASSISTANT_PANEL_WIDTH: f64 = 320.0;
 const MIN_TARGET_PANEL_WIDTH: f64 = 320.0;
+const TARGET_CHROME_HEIGHT: f64 = 136.0;
 const TARGET_BROWSER_EVENT: &str = "target-browser://state-changed";
 const TARGET_ASSET_EVENT: &str = "target-browser://focused-asset-changed";
+const TARGET_WEBVIEW_LABEL_PREFIX: &str = "target-webview-";
+const DEFAULT_TARGET_TAB_TITLE: &str = "New tab";
 const PAGE_SNAPSHOT_TIMEOUT_MS: u64 = 5_000;
 const PAGE_ACTION_TIMEOUT_MS: u64 = 5_000;
 
@@ -468,21 +470,29 @@ const sidekickBridge = window[BRIDGE_KEY];
 "#;
 
 struct BrowserState {
-    current_url: Mutex<String>,
-    loading: Mutex<bool>,
+    tabs: Mutex<Vec<BrowserTabState>>,
+    active_tab_id: Mutex<String>,
+    next_tab_index: Mutex<u64>,
     layout_preset: Mutex<LayoutPreset>,
-    page_title: Mutex<String>,
     asset_picker_enabled: Mutex<bool>,
     focused_asset: Mutex<Option<FocusedAssetContext>>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
+        let initial_tab = BrowserTabState {
+            id: "tab-1".into(),
+            current_url: DEFAULT_TARGET_URL.to_string(),
+            requested_url: DEFAULT_TARGET_URL.to_string(),
+            loading: false,
+            page_title: String::new(),
+        };
+
         Self {
-            current_url: Mutex::new(DEFAULT_TARGET_URL.to_string()),
-            loading: Mutex::new(false),
+            tabs: Mutex::new(vec![initial_tab.clone()]),
+            active_tab_id: Mutex::new(initial_tab.id),
+            next_tab_index: Mutex::new(2),
             layout_preset: Mutex::new(LayoutPreset::default()),
-            page_title: Mutex::new(String::new()),
             asset_picker_enabled: Mutex::new(false),
             focused_asset: Mutex::new(None),
         }
@@ -560,6 +570,18 @@ struct TargetBrowserState {
     layout_preset: LayoutPreset,
     page_title: String,
     asset_picker_enabled: bool,
+    active_tab_id: String,
+    tabs: Vec<BrowserTabState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTabState {
+    id: String,
+    current_url: String,
+    requested_url: String,
+    loading: bool,
+    page_title: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -680,32 +702,27 @@ fn navigate_target(
     state: State<'_, BrowserState>,
 ) -> Result<TargetBrowserState, AppError> {
     let parsed_url = normalize_url(&url)?;
-    let webview = app
-        .get_webview(TARGET_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))?;
-
     let normalized = parsed_url.to_string();
+    let active_tab_id = active_tab_id(state.inner());
+    let webview = webview_for_tab(&app, &active_tab_id)?;
 
-    *state.loading.lock().unwrap() = true;
-    *state.current_url.lock().unwrap() = normalized.clone();
-    state.page_title.lock().unwrap().clear();
-    *state.asset_picker_enabled.lock().unwrap() = false;
-    *state.focused_asset.lock().unwrap() = None;
+    update_tab(state.inner(), &active_tab_id, |tab| {
+        tab.loading = true;
+        tab.current_url = normalized.clone();
+        tab.requested_url = normalized.clone();
+        tab.page_title.clear();
+    })?;
+    clear_focus_and_picker(&app, state.inner())?;
 
     webview.navigate(parsed_url)?;
-    emit_focused_asset(&app, state.inner())?;
-
-    let payload = snapshot_state(state.inner(), normalized)?;
-    app.emit(TARGET_BROWSER_EVENT, payload.clone())?;
-    Ok(payload)
+    emit_browser_state(&app, state.inner())
 }
 
 #[tauri::command]
 fn get_target_browser_state(
     state: State<'_, BrowserState>,
 ) -> Result<TargetBrowserState, AppError> {
-    let requested_url = state.current_url.lock().unwrap().clone();
-    snapshot_state(state.inner(), requested_url)
+    snapshot_state(state.inner())
 }
 
 #[tauri::command]
@@ -725,13 +742,154 @@ fn get_focused_asset_context(
 }
 
 #[tauri::command]
+async fn open_target_tab(
+    url: Option<String>,
+    app: AppHandle,
+) -> Result<TargetBrowserState, AppError> {
+    let parsed_url = normalize_url(url.as_deref().unwrap_or(DEFAULT_TARGET_URL))?;
+    let normalized = parsed_url.to_string();
+    let tab_id = {
+        let state = app.state::<BrowserState>();
+        let next_tab_id = next_tab_id(state.inner());
+        state
+            .tabs
+            .lock()
+            .unwrap()
+            .push(new_browser_tab(next_tab_id.clone(), normalized.clone()));
+        *state.active_tab_id.lock().unwrap() = next_tab_id.clone();
+        next_tab_id
+    };
+
+    {
+        let state = app.state::<BrowserState>();
+        clear_focus_and_picker(&app, state.inner())?;
+    }
+
+    let app_handle = app.clone();
+    let tab_id_for_build = tab_id.clone();
+    let normalized_for_build = normalized.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        create_target_webview_for_tab(&app_handle, &tab_id_for_build, &normalized_for_build)
+    })
+    .await
+    .map_err(|error| AppError::Message(error.to_string()))??;
+
+    update_webview_layouts(&app)?;
+    let state = app.state::<BrowserState>();
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn activate_target_tab(
+    tab_id: String,
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    if !has_tab(state.inner(), &tab_id) {
+        return Err(AppError::Message("The requested tab was not found.".into()));
+    }
+
+    *state.active_tab_id.lock().unwrap() = tab_id;
+    clear_focus_and_picker(&app, state.inner())?;
+    update_webview_layouts(&app)?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn close_target_tab(
+    tab_id: String,
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    let mut tabs = state.tabs.lock().unwrap();
+    let tab_position = tabs
+        .iter()
+        .position(|tab| tab.id == tab_id)
+        .ok_or_else(|| AppError::Message("The requested tab was not found.".into()))?;
+
+    if tabs.len() == 1 {
+        return Err(AppError::Message(
+            "Keep at least one tab open in the browser pane.".into(),
+        ));
+    }
+
+    let was_active = active_tab_id(state.inner()) == tab_id;
+    tabs.remove(tab_position);
+
+    if was_active {
+        let next_index = tab_position
+            .saturating_sub(1)
+            .min(tabs.len().saturating_sub(1));
+        *state.active_tab_id.lock().unwrap() = tabs[next_index].id.clone();
+    }
+    drop(tabs);
+
+    clear_focus_and_picker(&app, state.inner())?;
+
+    if let Some(webview) = app.get_webview(&build_target_webview_label(&tab_id)) {
+        webview.close()?;
+    }
+
+    update_webview_layouts(&app)?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn reload_target(
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    let tab_id = active_tab_id(state.inner());
+    update_tab(state.inner(), &tab_id, |tab| {
+        tab.loading = true;
+    })?;
+    clear_focus_and_picker(&app, state.inner())?;
+    webview_for_tab(&app, &tab_id)?.reload()?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn navigate_target_back(
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    let tab_id = active_tab_id(state.inner());
+    update_tab(state.inner(), &tab_id, |tab| {
+        tab.loading = true;
+    })?;
+    clear_focus_and_picker(&app, state.inner())?;
+    webview_for_tab(&app, &tab_id)?.eval("window.history.back();")?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn navigate_target_forward(
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    let tab_id = active_tab_id(state.inner());
+    update_tab(state.inner(), &tab_id, |tab| {
+        tab.loading = true;
+    })?;
+    clear_focus_and_picker(&app, state.inner())?;
+    webview_for_tab(&app, &tab_id)?.eval("window.history.forward();")?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
 fn submit_page_snapshot(
     request_id: String,
     snapshot: TargetPageSnapshot,
     capture_state: State<'_, SnapshotCaptureState>,
     browser_state: State<'_, BrowserState>,
 ) -> Result<(), AppError> {
-    *browser_state.page_title.lock().unwrap() = snapshot.title.clone();
+    let tab_id = active_tab_id(browser_state.inner());
+    update_tab(browser_state.inner(), &tab_id, |tab| {
+        tab.page_title = snapshot.title.clone();
+        tab.current_url = snapshot.url.clone();
+        tab.requested_url = snapshot.url.clone();
+        tab.loading = snapshot.loading;
+    })?;
 
     let mut pending = capture_state.pending.lock().unwrap();
     if pending.request_id.as_deref() == Some(request_id.as_str()) {
@@ -779,10 +937,7 @@ fn set_layout_preset(
 
     update_webview_layouts(&app)?;
 
-    let requested_url = state.current_url.lock().unwrap().clone();
-    let payload = snapshot_state(state.inner(), requested_url)?;
-    app.emit(TARGET_BROWSER_EVENT, payload.clone())?;
-    Ok(payload)
+    emit_browser_state(&app, state.inner())
 }
 
 #[tauri::command]
@@ -791,17 +946,15 @@ fn set_asset_picker_enabled(
     app: AppHandle,
     browser_state: State<'_, BrowserState>,
 ) -> Result<TargetBrowserState, AppError> {
-    let webview = app
-        .get_webview(TARGET_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))?;
-
     *browser_state.asset_picker_enabled.lock().unwrap() = enabled;
-    webview.eval(&build_asset_picker_script(enabled)?)?;
+    disable_picker_on_all(&app, browser_state.inner())?;
 
-    let requested_url = browser_state.current_url.lock().unwrap().clone();
-    let payload = snapshot_state(browser_state.inner(), requested_url)?;
-    app.emit(TARGET_BROWSER_EVENT, payload.clone())?;
-    Ok(payload)
+    if enabled {
+        let tab_id = active_tab_id(browser_state.inner());
+        webview_for_tab(&app, &tab_id)?.eval(&build_asset_picker_script(true)?)?;
+    }
+
+    emit_browser_state(&app, browser_state.inner())
 }
 
 #[tauri::command]
@@ -812,7 +965,7 @@ fn perform_page_action(
     capture_state: State<'_, SnapshotCaptureState>,
     action_state: State<'_, ActionExecutionState>,
 ) -> Result<PageActionResult, AppError> {
-    let outcome = execute_page_action(&app, action_state.inner(), &action)?;
+    let outcome = execute_page_action(&app, browser_state.inner(), action_state.inner(), &action)?;
 
     if let Some(focused_asset) = outcome.focused_asset.clone() {
         *browser_state.focused_asset.lock().unwrap() = Some(focused_asset);
@@ -820,8 +973,7 @@ fn perform_page_action(
     }
 
     let snapshot = capture_page_snapshot(&app, browser_state.inner(), capture_state.inner())?;
-    let requested_url = browser_state.current_url.lock().unwrap().clone();
-    let browser = snapshot_state(browser_state.inner(), requested_url)?;
+    let browser = snapshot_state(browser_state.inner())?;
 
     Ok(PageActionResult {
         action,
@@ -841,7 +993,8 @@ pub fn run() {
         .manage(ActionExecutionState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            create_target_webview(app.handle())?;
+            create_initial_target_webview(app.handle())?;
+            register_resize_handler(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -849,6 +1002,12 @@ pub fn run() {
             get_target_browser_state,
             get_target_page_snapshot,
             get_focused_asset_context,
+            open_target_tab,
+            activate_target_tab,
+            close_target_tab,
+            reload_target,
+            navigate_target_back,
+            navigate_target_forward,
             submit_page_snapshot,
             submit_focused_asset_context,
             submit_page_action_result,
@@ -860,46 +1019,12 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn create_target_webview(app: &AppHandle) -> Result<(), AppError> {
-    if app.get_webview(TARGET_WEBVIEW_LABEL).is_some() {
-        return Ok(());
-    }
-
+fn register_resize_handler(app: &AppHandle) -> Result<(), AppError> {
     let main_window = app
         .get_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| AppError::Message("Main window was not found.".into()))?;
-
-    let page_events = app.clone();
-    let builder = WebviewBuilder::new(
-        TARGET_WEBVIEW_LABEL,
-        WebviewUrl::External(DEFAULT_TARGET_URL.parse::<Url>()?),
-    )
-    .on_page_load(move |_webview, payload| {
-        let loading = matches!(payload.event(), PageLoadEvent::Started);
-        let current_url = payload.url().to_string();
-
-        if let Some(state) = page_events.try_state::<BrowserState>() {
-            *state.loading.lock().unwrap() = loading;
-            *state.current_url.lock().unwrap() = current_url.clone();
-
-            if loading {
-                state.page_title.lock().unwrap().clear();
-                *state.asset_picker_enabled.lock().unwrap() = false;
-                *state.focused_asset.lock().unwrap() = None;
-                let _ = page_events.emit(TARGET_ASSET_EVENT, Option::<FocusedAssetContext>::None);
-            }
-
-            if let Ok(snapshot) = snapshot_state(state.inner(), current_url) {
-                let _ = page_events.emit(TARGET_BROWSER_EVENT, snapshot);
-            }
-        }
-    });
-
-    let state = app.state::<BrowserState>();
-    let layout = layout_for_window(&main_window, state.inner())?;
-    main_window.add_child(builder, layout.target_position, layout.target_size)?;
-
     let resize_handle = app.clone();
+
     main_window.on_window_event(move |event| {
         if matches!(
             event,
@@ -908,6 +1033,67 @@ fn create_target_webview(app: &AppHandle) -> Result<(), AppError> {
             let _ = update_webview_layouts(&resize_handle);
         }
     });
+
+    Ok(())
+}
+
+fn create_initial_target_webview(app: &AppHandle) -> Result<(), AppError> {
+    let state = app.state::<BrowserState>();
+    let active_tab = active_tab(state.inner())?;
+    create_target_webview_for_tab(app, &active_tab.id, &active_tab.current_url)
+}
+
+fn create_target_webview_for_tab(app: &AppHandle, tab_id: &str, url: &str) -> Result<(), AppError> {
+    let label = build_target_webview_label(tab_id);
+    if app.get_webview(&label).is_some() {
+        return Ok(());
+    }
+
+    let main_window = app
+        .get_window(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| AppError::Message("Main window was not found.".into()))?;
+
+    let page_events = app.clone();
+    let tab_id_for_load = tab_id.to_string();
+    let title_events = app.clone();
+    let tab_id_for_title = tab_id.to_string();
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(url.parse::<Url>()?))
+        .on_page_load(move |_webview, payload| {
+            let loading = matches!(payload.event(), PageLoadEvent::Started);
+            let current_url = payload.url().to_string();
+
+            if let Some(state) = page_events.try_state::<BrowserState>() {
+                let _ = update_tab(state.inner(), &tab_id_for_load, |tab| {
+                    tab.loading = loading;
+                    tab.current_url = current_url.clone();
+                    tab.requested_url = current_url.clone();
+                    if loading {
+                        tab.page_title.clear();
+                    }
+                });
+
+                if active_tab_id(state.inner()) == tab_id_for_load && loading {
+                    *state.asset_picker_enabled.lock().unwrap() = false;
+                    *state.focused_asset.lock().unwrap() = None;
+                    let _ =
+                        page_events.emit(TARGET_ASSET_EVENT, Option::<FocusedAssetContext>::None);
+                }
+
+                let _ = emit_browser_state(&page_events, state.inner());
+            }
+        })
+        .on_document_title_changed(move |_webview, title| {
+            if let Some(state) = title_events.try_state::<BrowserState>() {
+                let _ = update_tab(state.inner(), &tab_id_for_title, |tab| {
+                    tab.page_title = title.clone();
+                });
+                let _ = emit_browser_state(&title_events, state.inner());
+            }
+        });
+
+    let state = app.state::<BrowserState>();
+    let layout = layout_for_window(&main_window, state.inner())?;
+    main_window.add_child(builder, layout.target_position, layout.target_size)?;
 
     update_webview_layouts(app)?;
     Ok(())
@@ -920,17 +1106,27 @@ fn update_webview_layouts(app: &AppHandle) -> Result<(), AppError> {
     let assistant_webview = app
         .get_webview(MAIN_WEBVIEW_LABEL)
         .ok_or_else(|| AppError::Message("Assistant webview was not found.".into()))?;
-    let target_webview = app
-        .get_webview(TARGET_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Target webview was not found.".into()))?;
 
     let state = app.state::<BrowserState>();
     let layout = layout_for_window(&main_window, state.inner())?;
+    let active_tab_id = active_tab_id(state.inner());
+    let tabs = state.tabs.lock().unwrap().clone();
 
     assistant_webview.set_position(layout.assistant_position)?;
     assistant_webview.set_size(layout.assistant_size)?;
-    target_webview.set_position(layout.target_position)?;
-    target_webview.set_size(layout.target_size)?;
+
+    for tab in tabs {
+        if let Some(webview) = app.get_webview(&build_target_webview_label(&tab.id)) {
+            if tab.id == active_tab_id {
+                webview.show()?;
+                webview.set_position(layout.target_position)?;
+                webview.set_size(layout.target_size)?;
+            } else {
+                webview.hide()?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -954,6 +1150,7 @@ fn layout_for_size(
 
     let assistant_width = inner_size.width * layout_preset.left_ratio();
     let target_width = inner_size.width - assistant_width;
+    let target_height = (inner_size.height - TARGET_CHROME_HEIGHT).max(0.0);
 
     if assistant_width < MIN_ASSISTANT_PANEL_WIDTH || target_width < MIN_TARGET_PANEL_WIDTH {
         return Err(AppError::Message(
@@ -963,9 +1160,9 @@ fn layout_for_size(
 
     Ok(PaneLayout {
         assistant_position: LogicalPosition::new(0.0, 0.0),
-        assistant_size: LogicalSize::new(assistant_width, inner_size.height),
-        target_position: LogicalPosition::new(assistant_width, 0.0),
-        target_size: LogicalSize::new(target_width, inner_size.height),
+        assistant_size: LogicalSize::new(inner_size.width, inner_size.height),
+        target_position: LogicalPosition::new(assistant_width, TARGET_CHROME_HEIGHT),
+        target_size: LogicalSize::new(target_width, target_height),
     })
 }
 
@@ -993,18 +1190,120 @@ fn normalize_url(value: &str) -> Result<Url, AppError> {
     Ok(Url::parse(&format!("https://{trimmed}"))?)
 }
 
-fn snapshot_state(
-    state: &BrowserState,
-    requested_url: String,
-) -> Result<TargetBrowserState, AppError> {
+fn new_browser_tab(id: String, url: String) -> BrowserTabState {
+    BrowserTabState {
+        id,
+        current_url: url.clone(),
+        requested_url: url,
+        loading: true,
+        page_title: DEFAULT_TARGET_TAB_TITLE.into(),
+    }
+}
+
+fn next_tab_id(state: &BrowserState) -> String {
+    let mut next_tab_index = state.next_tab_index.lock().unwrap();
+    let tab_id = format!("tab-{}", *next_tab_index);
+    *next_tab_index += 1;
+    tab_id
+}
+
+fn active_tab_id(state: &BrowserState) -> String {
+    state.active_tab_id.lock().unwrap().clone()
+}
+
+fn active_tab(state: &BrowserState) -> Result<BrowserTabState, AppError> {
+    let tab_id = active_tab_id(state);
+    state
+        .tabs
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|tab| tab.id == tab_id)
+        .cloned()
+        .ok_or_else(|| AppError::Message("The active tab was not found.".into()))
+}
+
+fn has_tab(state: &BrowserState, tab_id: &str) -> bool {
+    state
+        .tabs
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|tab| tab.id == tab_id)
+}
+
+fn update_tab<F>(state: &BrowserState, tab_id: &str, updater: F) -> Result<(), AppError>
+where
+    F: FnOnce(&mut BrowserTabState),
+{
+    let mut tabs = state.tabs.lock().unwrap();
+    let tab = tabs
+        .iter_mut()
+        .find(|tab| tab.id == tab_id)
+        .ok_or_else(|| AppError::Message("The requested tab was not found.".into()))?;
+    updater(tab);
+    Ok(())
+}
+
+fn build_target_webview_label(tab_id: &str) -> String {
+    format!("{TARGET_WEBVIEW_LABEL_PREFIX}{tab_id}")
+}
+
+fn webview_for_tab(app: &AppHandle, tab_id: &str) -> Result<tauri::Webview, AppError> {
+    app.get_webview(&build_target_webview_label(tab_id))
+        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))
+}
+
+fn disable_picker_on_all(app: &AppHandle, state: &BrowserState) -> Result<(), AppError> {
+    let script = build_asset_picker_script(false)?;
+    let tab_ids = state
+        .tabs
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|tab| tab.id.clone())
+        .collect::<Vec<_>>();
+
+    for tab_id in tab_ids {
+        if let Some(webview) = app.get_webview(&build_target_webview_label(&tab_id)) {
+            let _ = webview.eval(&script);
+        }
+    }
+
+    Ok(())
+}
+
+fn clear_focus_and_picker(app: &AppHandle, state: &BrowserState) -> Result<(), AppError> {
+    *state.asset_picker_enabled.lock().unwrap() = false;
+    *state.focused_asset.lock().unwrap() = None;
+    disable_picker_on_all(app, state)?;
+    emit_focused_asset(app, state)?;
+    Ok(())
+}
+
+fn snapshot_state(state: &BrowserState) -> Result<TargetBrowserState, AppError> {
+    let active_tab = active_tab(state)?;
+    let tabs = state.tabs.lock().unwrap().clone();
+
     Ok(TargetBrowserState {
-        current_url: state.current_url.lock().unwrap().clone(),
-        requested_url,
-        loading: *state.loading.lock().unwrap(),
+        current_url: active_tab.current_url,
+        requested_url: active_tab.requested_url,
+        loading: active_tab.loading,
         layout_preset: *state.layout_preset.lock().unwrap(),
-        page_title: state.page_title.lock().unwrap().clone(),
+        page_title: active_tab.page_title,
         asset_picker_enabled: *state.asset_picker_enabled.lock().unwrap(),
+        active_tab_id: active_tab_id(state),
+        tabs,
     })
+}
+
+fn emit_browser_state(
+    app: &AppHandle,
+    state: &BrowserState,
+) -> Result<TargetBrowserState, AppError> {
+    let payload = snapshot_state(state)?;
+    app.emit(TARGET_BROWSER_EVENT, payload.clone())?;
+    Ok(payload)
 }
 
 fn emit_focused_asset(app: &AppHandle, state: &BrowserState) -> Result<(), AppError> {
@@ -1020,9 +1319,8 @@ fn capture_page_snapshot(
     browser_state: &BrowserState,
     capture_state: &SnapshotCaptureState,
 ) -> Result<TargetPageSnapshot, AppError> {
-    let webview = app
-        .get_webview(TARGET_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))?;
+    let tab_id = active_tab_id(browser_state);
+    let webview = webview_for_tab(app, &tab_id)?;
 
     let request_id = {
         let mut sequence = capture_state.sequence.lock().unwrap();
@@ -1059,25 +1357,25 @@ fn capture_page_snapshot(
     pending.response = None;
     drop(pending);
 
-    *browser_state.page_title.lock().unwrap() = snapshot.title.clone();
-
-    let requested_url = browser_state.current_url.lock().unwrap().clone();
-    app.emit(
-        TARGET_BROWSER_EVENT,
-        snapshot_state(browser_state, requested_url)?,
-    )?;
+    update_tab(browser_state, &tab_id, |tab| {
+        tab.page_title = snapshot.title.clone();
+        tab.current_url = snapshot.url.clone();
+        tab.requested_url = snapshot.url.clone();
+        tab.loading = snapshot.loading;
+    })?;
+    let _ = emit_browser_state(app, browser_state)?;
 
     Ok(snapshot)
 }
 
 fn execute_page_action(
     app: &AppHandle,
+    browser_state: &BrowserState,
     action_state: &ActionExecutionState,
     action: &PageActionRequest,
 ) -> Result<PageActionOutcome, AppError> {
-    let webview = app
-        .get_webview(TARGET_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Target webview is not ready yet.".into()))?;
+    let tab_id = active_tab_id(browser_state);
+    let webview = webview_for_tab(app, &tab_id)?;
 
     let request_id = {
         let mut sequence = action_state.sequence.lock().unwrap();
@@ -1119,10 +1417,18 @@ fn execute_page_action(
 }
 
 fn fallback_snapshot(state: &BrowserState, extraction_error: Option<String>) -> TargetPageSnapshot {
+    let active_tab = active_tab(state).unwrap_or_else(|_| BrowserTabState {
+        id: "fallback".into(),
+        current_url: DEFAULT_TARGET_URL.into(),
+        requested_url: DEFAULT_TARGET_URL.into(),
+        loading: false,
+        page_title: String::new(),
+    });
+
     TargetPageSnapshot {
-        url: state.current_url.lock().unwrap().clone(),
-        title: state.page_title.lock().unwrap().clone(),
-        loading: *state.loading.lock().unwrap(),
+        url: active_tab.current_url,
+        title: active_tab.page_title,
+        loading: active_tab.loading,
         captured_at: unix_timestamp(),
         visible_text: String::new(),
         headings: Vec::new(),
@@ -1355,11 +1661,12 @@ mod tests {
             layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split70_30).unwrap();
 
         assert_close(layout.assistant_position.x, 0.0, "assistant x");
-        assert_close(layout.assistant_size.width, 896.0, "assistant width");
+        assert_close(layout.assistant_size.width, 1280.0, "assistant width");
         assert_close(layout.target_position.x, 896.0, "target x");
         assert_close(layout.target_size.width, 384.0, "target width");
         assert_close(layout.assistant_size.height, 820.0, "assistant height");
-        assert_close(layout.target_size.height, 820.0, "target height");
+        assert_close(layout.target_position.y, TARGET_CHROME_HEIGHT, "target y");
+        assert_close(layout.target_size.height, 664.0, "target height");
     }
 
     #[test]
@@ -1367,7 +1674,7 @@ mod tests {
         let layout =
             layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split50_50).unwrap();
 
-        assert_close(layout.assistant_size.width, 640.0, "assistant width");
+        assert_close(layout.assistant_size.width, 1280.0, "assistant width");
         assert_close(layout.target_position.x, 640.0, "target x");
         assert_close(layout.target_size.width, 640.0, "target width");
     }
@@ -1377,7 +1684,7 @@ mod tests {
         let layout =
             layout_for_size(LogicalSize::new(1280.0, 820.0), LayoutPreset::Split30_70).unwrap();
 
-        assert_close(layout.assistant_size.width, 384.0, "assistant width");
+        assert_close(layout.assistant_size.width, 1280.0, "assistant width");
         assert_close(layout.target_position.x, 384.0, "target x");
         assert_close(layout.target_size.width, 896.0, "target width");
     }
@@ -1390,12 +1697,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(layout.assistant_size.width >= MIN_ASSISTANT_PANEL_WIDTH);
+        assert!(
+            MIN_WINDOW_WIDTH * LayoutPreset::Split30_70.left_ratio() >= MIN_ASSISTANT_PANEL_WIDTH
+        );
         assert!(layout.target_size.width >= MIN_TARGET_PANEL_WIDTH);
         assert_close(
-            layout.assistant_size.width + layout.target_size.width,
+            layout.assistant_size.width,
             MIN_WINDOW_WIDTH,
-            "total width",
+            "assistant width",
         );
     }
 
@@ -1409,17 +1718,28 @@ mod tests {
 
         for preset in presets {
             let layout = layout_for_size(LogicalSize::new(1440.0, 900.0), preset).unwrap();
+            let expected_target_x = 1440.0 * preset.left_ratio();
 
             assert_close(layout.assistant_position.x, 0.0, "assistant x");
             assert_close(
-                layout.target_position.x,
                 layout.assistant_size.width,
-                "target starts after assistant",
+                1440.0,
+                "assistant covers shell",
             );
             assert_close(
-                layout.assistant_size.width + layout.target_size.width,
+                layout.target_position.x,
+                expected_target_x,
+                "target starts after split",
+            );
+            assert_close(
+                layout.target_size.width + layout.target_position.x,
                 1440.0,
-                "panes cover full width",
+                "target reaches right edge",
+            );
+            assert_close(
+                layout.target_position.y,
+                TARGET_CHROME_HEIGHT,
+                "target sits below chrome",
             );
         }
     }

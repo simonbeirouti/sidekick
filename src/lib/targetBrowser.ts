@@ -33,6 +33,16 @@ export type TargetBrowserState = {
   layoutPreset: LayoutPreset;
   pageTitle: string;
   assetPickerEnabled: boolean;
+  activeTabId: string;
+  tabs: BrowserTabState[];
+};
+
+export type BrowserTabState = {
+  id: string;
+  currentUrl: string;
+  requestedUrl: string;
+  loading: boolean;
+  pageTitle: string;
 };
 
 export type TargetPageSnapshot = {
@@ -89,6 +99,30 @@ export function getTargetBrowserState() {
 
 export function navigateTarget(url: string) {
   return invoke<TargetBrowserState>("navigate_target", { url });
+}
+
+export function openTargetTab(url?: string) {
+  return invoke<TargetBrowserState>("open_target_tab", { url });
+}
+
+export function activateTargetTab(tabId: string) {
+  return invoke<TargetBrowserState>("activate_target_tab", { tabId });
+}
+
+export function closeTargetTab(tabId: string) {
+  return invoke<TargetBrowserState>("close_target_tab", { tabId });
+}
+
+export function reloadTarget() {
+  return invoke<TargetBrowserState>("reload_target");
+}
+
+export function navigateTargetBack() {
+  return invoke<TargetBrowserState>("navigate_target_back");
+}
+
+export function navigateTargetForward() {
+  return invoke<TargetBrowserState>("navigate_target_forward");
 }
 
 export function setLayoutPreset(preset: LayoutPreset) {

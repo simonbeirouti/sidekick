@@ -5,9 +5,11 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 
 ## Current Product State
 - Sidekick now runs as a native two-webview desktop workspace inside Tauri.
-- The left webview hosts the assistant interface and the right webview hosts the active target page.
+- The left webview hosts the assistant interface and the right side now combines browser-style shell chrome with one or more native target-page webviews.
 - The current layout uses exact native split presets of `70/30`, `50/50`, and `30/70` for left/right pane widths.
 - The two panes do not visually overlap and resize together from shared native layout logic.
+- The right pane now includes native browser-style chrome for tabs, URL entry, reload, back/forward navigation, and page picking above the live target page.
+- The target browser now supports multiple tabs in the right pane, with a single active tab rendered at a time and tab metadata surfaced into the shell.
 - The assistant can inspect the active right-side page, extract grounded context, and answer chat questions about that page.
 - The assistant can now summarize the live page, extract structured interactive elements, and keep responses grounded in either whole-page or focused-asset context.
 - The assistant can execute low-risk page actions against the right-side webview, currently including `click`, `type`, and `scroll`.
@@ -45,6 +47,10 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Open a target page and ask the assistant to perform a safe action such as clicking a visible control, typing into a non-sensitive field, or scrolling.
 - Success: the assistant executes the action inside the active right-side session, refreshes page context, and reports the result back in chat.
 
+### 4a. Browser Chrome Test
+- Open several tabs in the right pane, switch between them, navigate with the URL bar and back / forward controls, and reload the active page.
+- Success: the right pane behaves like a lightweight browser shell, tab changes remain grounded to the active target session, and the page always renders beneath the browser chrome with no extra UI rows leaking into the content area.
+
 ### 5. Human Review Test
 - Trigger a login, verification, password, or CAPTCHA-like flow and ask the assistant to continue.
 - Success: the assistant pauses with an inline review card in chat, accepts human approve/edit/reject input, and resumes from that same flow.
@@ -68,11 +74,18 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 ## Core Architecture
 ### Dual-Webview Workspace
 - The app must support two webviews in the same window.
-- One webview hosts the Sidekick AI interface.
-- One webview hosts the active third-party learning site.
+- One webview hosts the Sidekick AI interface and application shell.
+- One or more native child webviews host the active third-party learning sites in the right pane.
 - Both must remain visible so the assistant can operate alongside the student’s live browsing session.
 - Layout is controlled natively by Tauri, not by a fake placeholder pane in the frontend.
 - The current supported pane presets are `70/30`, `50/50`, and `30/70` for left/right widths.
+- The right pane includes a browser-style chrome region above the target page for tabs, address entry, and navigation controls.
+
+### Browser Shell and Tab Layer
+- The system should present the right pane like a lightweight browser while preserving the desktop-first trust boundary.
+- The browser shell owns tab state, active-tab switching, address entry, reload, and back / forward controls.
+- Each target tab maps to a native target-site webview managed by Rust, while the assistant shell remains in the trusted app webview.
+- The active tab is the source of truth for visible page context, grounded actions, and picker state.
 
 ### Page Understanding and Action Layer
 - The system must be able to read the current page state, including visible content, DOM structure, and relevant interactive elements.
@@ -80,6 +93,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - AI behavior should follow a loop of observe, reason, and act so the assistant can respond to the page as it changes.
 - Current implemented slice: observe -> reason -> act for safe interactions. The assistant can capture whole-page state, summarize grounded context, perform `click` / `type` / `scroll` actions, refresh page state after actions, and surface inline review when a human decision is needed.
 - Current implemented focus slice: manual hover-and-pick element selection for focused review, allowing the assistant to reason over a selected asset or UI target instead of sending full-page context by default.
+- Current implemented shell slice: native browser-style chrome in the right pane with tab creation, tab switching, URL entry, reload, and back / forward navigation while keeping the target page below the chrome region.
 - Next slice: expand sensitive-flow handling, broader action coverage, richer blocked-state recovery, and more durable cross-device intervention flows.
 
 ### Authentication
@@ -108,6 +122,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 | Site session | Encrypted storage bundle | Blob upload/download |
 | Page context | Rust bridge from webview | Realtime or direct app state |
 | Page actions | Rust/Tauri action bridge | Direct app state |
+| Browser shell tabs and navigation | Native right-pane chrome + Rust tab state | Direct app state |
 | Focused asset review | Manual page picker + grounded extraction | Direct app state |
 | Human review state | Inline chat workflow + agent checkpointing | Direct app state |
 | User settings | Supabase database | Row updates |
@@ -117,6 +132,9 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Shared window layout that keeps the AI interface and target site visible at the same time.
 - Native split layout so the left assistant pane and right target-site pane remain synchronized with shared webview bounds.
 - Support exact split presets of `70/30`, `50/50`, and `30/70` with no overlap between panes.
+- A browser-style right-pane chrome layer that stays visually distinct from the third-party page content.
+- Support multiple right-pane tabs with one active target-site webview at a time.
+- URL entry, reload, and back / forward controls should operate on the active right-pane tab.
 - A bridge for securely reading page content, DOM state, and interaction targets from the site webview.
 - A bridge for executing page actions in the site webview, including click, type, scroll, and navigation events.
 - Structured page element descriptors so the AI can refer to visible targets deterministically instead of relying only on raw text snapshots.
@@ -142,6 +160,7 @@ Sidekick AI is a persistent student assistant that runs alongside third-party le
 - Sidekick can recover from blocked interactions by handing off to the student on another device.
 - Sidekick can answer questions about the live target page using grounded page context captured from that same session.
 - Sidekick can see the live state of the target page and execute actions in that same session without breaking the side-by-side experience.
+- Sidekick presents the right pane as a lightweight browser shell with visible tabs, current URL, and direct navigation controls above the active page.
 - Sidekick can narrow its reasoning to a user-selected asset or element on the live page to keep reviews more precise and token-efficient.
 - Sidekick can pause sensitive actions for inline human feedback and continue from the same chat flow with an actionable next step.
 - Sidekick presents a stable dual-view shell where both panes remain usable, visually aligned, and non-overlapping as the window and pane presets change.

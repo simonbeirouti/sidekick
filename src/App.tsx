@@ -1,11 +1,25 @@
-import { FormEvent, KeyboardEvent, startTransition, useEffect, useId, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  startTransition,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import {
   AlertCircle,
+  ChevronLeft,
+  ChevronRight,
+  Globe,
   LoaderCircle,
   MousePointerClick,
+  Plus,
+  RefreshCcw,
   SendHorizontal,
   Sparkles,
   WandSparkles,
+  X,
 } from "lucide-react";
 
 import {
@@ -30,16 +44,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 
 import {
+  activateTargetTab,
+  closeTargetTab,
   getFocusedAssetContext,
   getTargetBrowserState,
   LAYOUT_PRESETS,
   listenToFocusedAsset,
   listenToTargetBrowser,
   navigateTarget,
+  navigateTargetBack,
+  navigateTargetForward,
+  openTargetTab,
+  reloadTarget,
   setAssetPickerEnabled,
   setLayoutPreset,
+  type BrowserTabState,
   type FocusedAssetContext,
   type LayoutPreset,
   type PageActionRequest,
@@ -48,10 +70,16 @@ import {
 } from "./lib/targetBrowser";
 
 const DEFAULT_PROVIDER = (import.meta.env.VITE_LLM_PROVIDER ?? "openai") as ChatProvider;
+const TARGET_CHROME_HEIGHT_PX = 156;
 const LAYOUT_PRESET_LABELS: Record<LayoutPreset, string> = {
   "70-30": "70/30",
   "50-50": "50/50",
   "30-70": "30/70",
+};
+const COLUMN_TEMPLATE_BY_PRESET: Record<LayoutPreset, string> = {
+  "70-30": "70fr 30fr",
+  "50-50": "50fr 50fr",
+  "30-70": "30fr 70fr",
 };
 
 type TranscriptMessage =
@@ -111,6 +139,11 @@ function App() {
   const [threadId] = useState(() => crypto.randomUUID());
   const activeLayoutPreset = browser?.layoutPreset ?? "50-50";
   const draftId = useId();
+  const tabStripRef = useRef<HTMLDivElement | null>(null);
+  const activeTab =
+    browser?.tabs.find((tab) => tab.id === browser.activeTabId) ??
+    browser?.tabs[0] ??
+    null;
 
   useEffect(() => {
     let mounted = true;
@@ -128,7 +161,7 @@ function App() {
 
         setBrowser(initialState);
         setFocusedAsset(initialFocusedAsset);
-        setInput(initialState.currentUrl);
+        setInput(initialState.requestedUrl || initialState.currentUrl);
       } catch (loadError) {
         if (mounted) {
           setError(getErrorMessage(loadError));
@@ -144,10 +177,8 @@ function App() {
       }
 
       setBrowser(state);
-      if (!state.loading) {
-        setInput(state.currentUrl);
-        setSubmitting(false);
-      }
+      setInput(state.requestedUrl || state.currentUrl);
+      setSubmitting(false);
     });
 
     const unlistenFocusedAssetPromise = listenToFocusedAsset((nextFocusedAsset) => {
@@ -163,7 +194,23 @@ function App() {
     };
   }, []);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    if (!browser?.activeTabId || !tabStripRef.current) {
+      return;
+    }
+
+    const activeTabElement = tabStripRef.current.querySelector<HTMLElement>(
+      `[data-tab-id="${CSS.escape(browser.activeTabId)}"]`,
+    );
+
+    activeTabElement?.scrollIntoView({
+      behavior: "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [browser?.activeTabId, browser?.tabs.length]);
+
+  async function handleNavigateSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setSubmitting(true);
@@ -176,6 +223,77 @@ function App() {
     } catch (submitError) {
       setSubmitting(false);
       setError(getErrorMessage(submitError));
+    }
+  }
+
+  async function handleOpenTab() {
+    setError("");
+    setSubmitting(true);
+
+    try {
+      const nextState = await openTargetTab();
+      setBrowser(nextState);
+      setInput(nextState.requestedUrl);
+      setFocusedAsset(null);
+    } catch (openError) {
+      setError(getErrorMessage(openError));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleActivateTab(tabId: string) {
+    if (!browser || tabId === browser.activeTabId) {
+      return;
+    }
+
+    setError("");
+
+    try {
+      const nextState = await activateTargetTab(tabId);
+      setBrowser(nextState);
+      setInput(nextState.requestedUrl || nextState.currentUrl);
+      setFocusedAsset(null);
+    } catch (activateError) {
+      setError(getErrorMessage(activateError));
+    }
+  }
+
+  async function handleCloseTab(tabId: string) {
+    setError("");
+
+    try {
+      const nextState = await closeTargetTab(tabId);
+      setBrowser(nextState);
+      setInput(nextState.requestedUrl || nextState.currentUrl);
+      setFocusedAsset(null);
+    } catch (closeError) {
+      setError(getErrorMessage(closeError));
+    }
+  }
+
+  async function handleHistoryNavigation(direction: "back" | "forward") {
+    setError("");
+
+    try {
+      const nextState =
+        direction === "back" ? await navigateTargetBack() : await navigateTargetForward();
+      setBrowser(nextState);
+      setFocusedAsset(null);
+    } catch (navigationError) {
+      setError(getErrorMessage(navigationError));
+    }
+  }
+
+  async function handleReload() {
+    setError("");
+
+    try {
+      const nextState = await reloadTarget();
+      setBrowser(nextState);
+      setFocusedAsset(null);
+    } catch (reloadError) {
+      setError(getErrorMessage(reloadError));
     }
   }
 
@@ -333,300 +451,392 @@ function App() {
   }
 
   return (
-    <main className="min-h-screen overflow-hidden p-2 md:p-3 lg:p-6">
-      <section className="@container flex min-h-[calc(100vh-1rem)] w-full min-w-0 flex-col gap-4 border border-border/80 bg-background/90 p-4 text-foreground shadow-[0_20px_60px_rgba(39,52,68,0.12),inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-[10px] md:min-h-[calc(100vh-1.5rem)] md:d:p-5 lg:min-h-[calc(100vh-3rem)] lg:gap-5 lg:p-7">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <h1 className="m-0 text-[1.35rem] leading-none font-semibold tracking-[-0.05em] text-foreground @min-[421px]:text-[1.7rem] lg:text-[2.4rem]">
-            Sidekick page chat
-          </h1>
-
-          <div className="flex min-w-[220px] items-center gap-2">
-            <Label htmlFor="provider-select" className="text-sm font-medium text-muted-foreground">
-              Provider
-            </Label>
-            <Select value={provider} onValueChange={(value) => setProvider(value as ChatProvider)}>
-              <SelectTrigger
-                id="provider-select"
-                className="h-10 w-[160px] border-border bg-card px-3 text-foreground"
-              >
-                <SelectValue placeholder="Choose provider" />
-              </SelectTrigger>
-              <SelectContent className="bg-popover">
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="ollama">Ollama</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <Card className="rounded-none flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
-          <CardHeader className="pb-3">
-            <div className="border border-border bg-muted/40 px-4 py-3">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="m-0 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-muted-foreground">
-                    Current page context
-                  </p>
-                  <p className="mt-1 text-sm font-semibold text-card-foreground">
-                    {browser?.pageTitle || "Page title will appear after the first inspection"}
-                  </p>
-                  <p className="mt-1 break-words text-[0.82rem] text-muted-foreground">
-                    {browser?.currentUrl ?? "Waiting for the native webview to load"}
-                  </p>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <Button
-                    type="button"
-                    variant={browser?.assetPickerEnabled ? "default" : "outline"}
-                    className="rounded-none"
-                    onClick={() => {
-                      void handleToggleAssetPicker();
-                    }}
-                    disabled={!browser}
-                  >
-                    {browser?.assetPickerEnabled ? (
-                      <>
-                        <MousePointerClick className="size-4" />
-                        Picker live
-                      </>
-                    ) : (
-                      <>
-                        <WandSparkles className="size-4" />
-                        {focusedAsset ? "Pick another asset" : "Pick from page"}
-                      </>
-                    )}
-                  </Button>
-                </div>
+    <main className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(216,226,240,0.95),_rgba(243,246,249,0.85)_42%,_rgba(228,235,241,0.9)_100%)] text-foreground">
+      <section
+        className="grid h-full w-full min-w-0 min-h-0"
+        style={{
+          gridTemplateColumns: COLUMN_TEMPLATE_BY_PRESET[activeLayoutPreset],
+          gridTemplateRows: `${TARGET_CHROME_HEIGHT_PX}px minmax(0, 1fr)`,
+        }}
+      >
+        <div className="row-span-2 min-h-0 min-w-0 border-r border-border/80 bg-background/88">
+          <div className="flex h-full min-h-0 min-w-0 flex-col gap-4 p-4 lg:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="m-0 text-[1.45rem] leading-none font-semibold tracking-[-0.05em] text-foreground lg:text-[2rem]">
+                  Sidekick page chat
+                </h1>
+                <p className="mt-2 mb-0 text-sm text-muted-foreground">
+                  Chat and reasoning stay on the left while browser controls now live beside the active page.
+                </p>
               </div>
 
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {focusedAsset?.element ? (
-                  <Badge variant="outline" className="rounded-none border-border px-3 py-1 text-xs">
-                    Selected: {summarizeFocusedAsset(focusedAsset)}
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="rounded-none border-dashed px-3 py-1 text-xs">
-                    No asset selected
-                  </Badge>
-                )}
-
-                {browser?.assetPickerEnabled ? (
-                  <p className="m-0 text-xs text-muted-foreground">
-                    Hover the page on the right and click an element to lock the selection.
-                  </p>
-                ) : null}
+              <div className="flex min-w-[220px] items-center gap-2">
+                <Label htmlFor="provider-select" className="text-sm font-medium text-muted-foreground">
+                  Provider
+                </Label>
+                <Select value={provider} onValueChange={(value) => setProvider(value as ChatProvider)}>
+                  <SelectTrigger
+                    id="provider-select"
+                    className="h-10 w-[160px] border-border bg-card px-3 text-foreground"
+                  >
+                    <SelectValue placeholder="Choose provider" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-popover">
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="ollama">Ollama</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-          </CardHeader>
 
-          <CardContent className="flex min-h-0 flex-1 flex-col gap-4">
-            <div className="flex min-h-[300px] flex-1 flex-col gap-3 overflow-y-auto border border-border bg-muted/30 p-3">
-              {messages.map((message) => (
-                <article
-                  key={message.id}
-                  className={
-                    message.role === "assistant"
-                      ? "max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]"
-                      : "max-w-[92%] self-end bg-primary px-4 py-3 text-sm text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.22)]"
-                  }
-                >
-                  <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
-                    {message.role === "assistant" ? (
-                      <>
-                        <Sparkles className="size-3.5" />
-                        Sidekick
-                      </>
-                    ) : (
-                      "You"
-                    )}
+            <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
+              <CardHeader className="pb-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="m-0 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-muted-foreground">
+                      Current page context
+                    </p>
+                    <p className="mt-1 text-sm font-semibold text-card-foreground">
+                      {browser?.pageTitle || "Page title will appear after the first inspection"}
+                    </p>
+                    <p className="mt-1 break-words text-[0.82rem] text-muted-foreground">
+                      {browser?.currentUrl ?? "Waiting for the native webview to load"}
+                    </p>
                   </div>
 
-                  <p className="m-0 whitespace-pre-wrap leading-6">{message.content}</p>
+                  <span className="border border-border px-3 py-1 text-xs font-semibold text-muted-foreground">
+                    {LAYOUT_PRESET_LABELS[activeLayoutPreset]}
+                  </span>
+                </div>
 
-                  {message.type === "action" ? (
-                    <div className="mt-3 border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
-                      <p className="m-0 font-semibold text-card-foreground">
-                        Action result: {message.action.action.kind}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {focusedAsset?.element ? (
+                    <Badge variant="outline" className="rounded-none border-border px-3 py-1 text-xs">
+                      Selected: {summarizeFocusedAsset(focusedAsset)}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="rounded-none border-dashed px-3 py-1 text-xs">
+                      No asset selected
+                    </Badge>
+                  )}
+
+                  {activeTab ? (
+                    <Badge variant="outline" className="rounded-none border-border px-3 py-1 text-xs">
+                      Active tab: {tabLabel(activeTab)}
+                    </Badge>
+                  ) : null}
+                </div>
+              </CardHeader>
+            </Card>
+
+            <Card className="rounded-none flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
+              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4">
+                <div className="flex min-h-[260px] flex-1 flex-col gap-3 overflow-y-auto border border-border bg-muted/30 p-3">
+                  {messages.map((message) => (
+                    <article
+                      key={message.id}
+                      className={
+                        message.role === "assistant"
+                          ? "max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]"
+                          : "max-w-[92%] self-end bg-primary px-4 py-3 text-sm text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.22)]"
+                      }
+                    >
+                      <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
+                        {message.role === "assistant" ? (
+                          <>
+                            <Sparkles className="size-3.5" />
+                            Sidekick
+                          </>
+                        ) : (
+                          "You"
+                        )}
+                      </div>
+
+                      <p className="m-0 whitespace-pre-wrap leading-6">{message.content}</p>
+
+                      {message.type === "action" ? (
+                        <div className="mt-3 border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+                          <p className="m-0 font-semibold text-card-foreground">
+                            Action result: {message.action.action.kind}
+                          </p>
+                          <p className="mt-1 m-0">
+                            {message.action.success ? "Completed" : "Failed"} on{" "}
+                            {message.action.browser.pageTitle || message.action.browser.currentUrl}
+                          </p>
+                          {message.action.focusedAsset?.element ? (
+                            <p className="mt-1 m-0">
+                              Focused asset: {summarizeFocusedAsset(message.action.focusedAsset)}
+                            </p>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {message.type === "review" ? (
+                        <ReviewCard
+                          review={message.review}
+                          draft={reviewDrafts[message.review.id]}
+                          disabled={isResponding}
+                          onDraftChange={(nextDraft) => {
+                            setReviewDrafts((currentDrafts) => ({
+                              ...currentDrafts,
+                              [message.review.id]: nextDraft,
+                            }));
+                          }}
+                          onDecision={(decision) => {
+                            void handleReviewDecision(message.review, decision);
+                          }}
+                        />
+                      ) : null}
+                    </article>
+                  ))}
+
+                  {isResponding ? (
+                    <article className="max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]">
+                      <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
+                        <Sparkles className="size-3.5" />
+                        Sidekick
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <LoaderCircle className="size-4 animate-spin" />
+                        Inspecting the page and working through the next step
+                      </div>
+                    </article>
+                  ) : null}
+                </div>
+
+                <form className="grid gap-3" onSubmit={handleChatSubmit}>
+                  <Label htmlFor={draftId} className="text-muted-foreground">
+                    Ask about the page, the selected asset, or tell Sidekick what to do next
+                  </Label>
+                  <Textarea
+                    id={draftId}
+                    className="rounded-none min-h-28 border-border bg-background px-4 py-3 text-foreground"
+                    value={draft}
+                    onChange={(event) => setDraft(event.currentTarget.value)}
+                    onKeyDown={handleComposerKeyDown}
+                    placeholder="Summarize this page. Review the selected asset. Click the next practice button."
+                    disabled={isResponding || pendingReview !== null}
+                  />
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-col gap-1">
+                      <p className="m-0 text-xs text-muted-foreground">
+                        Shift+Enter for a new line. Enter to send.
                       </p>
-                      <p className="mt-1 m-0">
-                        {message.action.success ? "Completed" : "Failed"} on{" "}
-                        {message.action.browser.pageTitle || message.action.browser.currentUrl}
-                      </p>
-                      {message.action.focusedAsset?.element ? (
-                        <p className="mt-1 m-0">
-                          Focused asset: {summarizeFocusedAsset(message.action.focusedAsset)}
+                      {pendingReview ? (
+                        <p className="m-0 text-xs text-amber-700">
+                          Resolve the pending review card before sending another request.
                         </p>
                       ) : null}
                     </div>
-                  ) : null}
-
-                  {message.type === "review" ? (
-                    <ReviewCard
-                      review={message.review}
-                      draft={reviewDrafts[message.review.id]}
-                      disabled={isResponding}
-                      onDraftChange={(nextDraft) => {
-                        setReviewDrafts((currentDrafts) => ({
-                          ...currentDrafts,
-                          [message.review.id]: nextDraft,
-                        }));
-                      }}
-                      onDecision={(decision) => {
-                        void handleReviewDecision(message.review, decision);
-                      }}
-                    />
-                  ) : null}
-                </article>
-              ))}
-
-              {isResponding ? (
-                <article className="max-w-[92%] self-start bg-card px-4 py-3 text-sm text-card-foreground shadow-[0_8px_24px_rgba(26,39,52,0.06)]">
-                  <div className="mb-1 flex items-center gap-2 text-[0.72rem] font-semibold uppercase tracking-[0.12em] opacity-75">
-                    <Sparkles className="size-3.5" />
-                    Sidekick
+                    <Button
+                      type="submit"
+                      size="lg"
+                      className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                      disabled={isResponding || pendingReview !== null || draft.trim().length === 0}
+                    >
+                      {isResponding ? (
+                        <>
+                          <LoaderCircle className="size-4 animate-spin" />
+                          Thinking
+                        </>
+                      ) : (
+                        <>
+                          <SendHorizontal className="size-4" />
+                          Send
+                        </>
+                      )}
+                    </Button>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <LoaderCircle className="size-4 animate-spin" />
-                    Inspecting the page and working through the next step
-                  </div>
-                </article>
-              ) : null}
-            </div>
+                </form>
 
-            <form className="grid gap-3" onSubmit={handleChatSubmit}>
-              <Label htmlFor={draftId} className="text-muted-foreground">
-                Ask about the page, the selected asset, or tell Sidekick what to do next
-              </Label>
-              <Textarea
-                id={draftId}
-                className="rounded-none min-h-28 border-border bg-background px-4 py-3 text-foreground"
-                value={draft}
-                onChange={(event) => setDraft(event.currentTarget.value)}
-                onKeyDown={handleComposerKeyDown}
-                placeholder="Summarize this page. Review the selected asset. Click the next practice button."
-                disabled={isResponding || pendingReview !== null}
-              />
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex flex-col gap-1">
-                  <p className="m-0 text-xs text-muted-foreground">
-                    Shift+Enter for a new line. Enter to send.
-                  </p>
-                  {pendingReview ? (
-                    <p className="m-0 text-xs text-amber-700">
-                      Resolve the pending review card before sending another request.
-                    </p>
-                  ) : null}
+                {agentError ? (
+                  <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
+                    <AlertCircle className="size-4" />
+                    <AlertTitle>Couldn&apos;t complete the grounded step</AlertTitle>
+                    <AlertDescription>{agentError}</AlertDescription>
+                  </Alert>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
+              <CardHeader className="pb-0">
+                <CardTitle className="text-sm font-semibold text-card-foreground">
+                  Pane Layout
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-3 pt-3">
+                <div className="grid grid-cols-3 gap-2">
+                  {LAYOUT_PRESETS.map((preset) => (
+                    <Button
+                      key={preset}
+                      type="button"
+                      variant={preset === activeLayoutPreset ? "default" : "outline"}
+                      className="h-11 rounded-none text-sm font-semibold"
+                      onClick={() => {
+                        void handleLayoutPresetChange(preset);
+                      }}
+                    >
+                      {LAYOUT_PRESET_LABELS[preset]}
+                    </Button>
+                  ))}
                 </div>
-                <Button
-                  type="submit"
-                  size="lg"
-                  className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
-                  disabled={isResponding || pendingReview !== null || draft.trim().length === 0}
-                >
-                  {isResponding ? (
-                    <>
-                      <LoaderCircle className="size-4 animate-spin" />
-                      Thinking
-                    </>
-                  ) : (
-                    <>
-                      <SendHorizontal className="size-4" />
-                      Send
-                    </>
-                  )}
-                </Button>
-              </div>
-            </form>
+                <p className="m-0 text-xs text-muted-foreground">
+                  The app shell now spans the full window so the right pane can carry its own browser chrome.
+                </p>
+              </CardContent>
+            </Card>
 
-            {agentError ? (
+            {error ? (
               <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
                 <AlertCircle className="size-4" />
-                <AlertTitle>Couldn&apos;t complete the grounded step</AlertTitle>
-                <AlertDescription>{agentError}</AlertDescription>
+                <AlertTitle>Couldn&apos;t update the embedded browser</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
-          </CardContent>
-        </Card>
+          </div>
+        </div>
 
-        <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
-          <CardHeader className="pb-0">
-            <CardTitle className="text-sm font-semibold text-card-foreground">
-              Target Page
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form className="grid gap-3" onSubmit={handleSubmit}>
-              <Label htmlFor="target-url" className="text-muted-foreground">
-                URL
-              </Label>
-              <Input
-                id="target-url"
-                className="h-11 border-border bg-background text-foreground rounded-none"
-                value={input}
-                onChange={(event) => setInput(event.currentTarget.value)}
-                placeholder="Enter a URL"
-                autoComplete="off"
-              />
+        <div className="min-w-0 overflow-hidden border-b border-border/80 bg-[linear-gradient(180deg,rgba(247,249,251,0.98),rgba(239,244,248,0.96))] backdrop-blur">
+          <div className="flex h-full flex-col gap-2.5 p-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <div ref={tabStripRef} className="min-w-0 flex-1 overflow-x-auto">
+                <div className="flex w-max min-w-full items-center gap-2">
+                  {browser?.tabs.map((tab) => {
+                    const isActive = tab.id === browser.activeTabId;
+
+                    return (
+                      <button
+                        key={tab.id}
+                        data-tab-id={tab.id}
+                        type="button"
+                        className={cn(
+                          "group flex h-10 items-center gap-2.5 border px-3 text-left text-sm font-medium leading-none tracking-[-0.01em] transition",
+                          isActive
+                            ? "w-[256px] border-black bg-black text-white shadow-[0_10px_24px_rgba(0,0,0,0.18)]"
+                            : "w-[156px] border-border bg-white/75 text-slate-700 hover:border-slate-400 hover:bg-white",
+                        )}
+                        onClick={() => {
+                          void handleActivateTab(tab.id);
+                        }}
+                      >
+                        <Globe className="size-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>
+                        <span
+                          className={cn(
+                            "inline-flex shrink-0 items-center justify-center rounded-full p-1 opacity-70 transition hover:opacity-100",
+                            browser.tabs.length <= 1 && "pointer-events-none opacity-30",
+                          )}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (browser.tabs.length > 1) {
+                              void handleCloseTab(tab.id);
+                            }
+                          }}
+                        >
+                          <X className="size-3.5" />
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
               <Button
-                type="submit"
-                size="lg"
-                className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
+                type="button"
+                variant="outline"
+                className="h-10 shrink-0 rounded-none px-3"
+                onClick={() => {
+                  void handleOpenTab();
+                }}
                 disabled={submitting}
               >
-                {submitting ? (
+                <Plus className="size-4" />
+              </Button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-10 w-10 rounded-none bg-white/70"
+                onClick={() => {
+                  void handleHistoryNavigation("back");
+                }}
+                disabled={!browser}
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-10 w-10 rounded-none bg-white/70"
+                onClick={() => {
+                  void handleHistoryNavigation("forward");
+                }}
+                disabled={!browser}
+              >
+                <ChevronRight className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-10 w-10 rounded-none bg-white/70"
+                onClick={() => {
+                  void handleReload();
+                }}
+                disabled={!browser}
+              >
+                <RefreshCcw className="size-4" />
+              </Button>
+
+              <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={handleNavigateSubmit}>
+                <Input
+                  id="target-url"
+                  className="h-10 rounded-none border-border bg-white/88 text-foreground"
+                  value={input}
+                  onChange={(event) => setInput(event.currentTarget.value)}
+                  placeholder="Enter a URL"
+                  autoComplete="off"
+                />
+              </form>
+
+              <Button
+                type="button"
+                variant={browser?.assetPickerEnabled ? "default" : "outline"}
+                className={cn(
+                  "h-10 rounded-none px-4",
+                  browser?.assetPickerEnabled
+                    ? "border-slate-400 bg-slate-200 text-slate-950 hover:bg-slate-300"
+                    : "bg-white/70",
+                )}
+                onClick={() => {
+                  void handleToggleAssetPicker();
+                }}
+                disabled={!browser}
+              >
+                {browser?.assetPickerEnabled ? (
                   <>
-                    <LoaderCircle className="size-4 animate-spin" />
-                    Loading
+                    <MousePointerClick className="size-4" />
+                    Picker live
                   </>
                 ) : (
-                  "Open on right"
+                  <>
+                    <WandSparkles className="size-4" />
+                    Pick
+                  </>
                 )}
               </Button>
-            </form>
-          </CardContent>
-        </Card>
-
-        <Card className="rounded-none border border-border/80 bg-card/85 shadow-sm">
-          <CardHeader className="pb-0">
-            <div className="flex items-center justify-between gap-3">
-              <CardTitle className="text-sm font-semibold text-card-foreground">
-                Pane Layout
-              </CardTitle>
-              <span className="border border-border px-3 py-1 text-xs font-semibold text-muted-foreground">
-                {LAYOUT_PRESET_LABELS[activeLayoutPreset]}
-              </span>
             </div>
-          </CardHeader>
-          <CardContent className="grid gap-3 pt-3">
-            <div className="grid grid-cols-3 gap-2">
-              {LAYOUT_PRESETS.map((preset) => (
-                <Button
-                  key={preset}
-                  type="button"
-                  variant={preset === activeLayoutPreset ? "default" : "outline"}
-                  className="h-11 text-sm font-semibold rounded-none"
-                  onClick={() => {
-                    void handleLayoutPresetChange(preset);
-                  }}
-                >
-                  {LAYOUT_PRESET_LABELS[preset]}
-                </Button>
-              ))}
-            </div>
-            <p className="m-0 text-xs text-muted-foreground">
-              Assistant on the left, target page on the right. Native panes stay flush with no overlap.
-            </p>
-          </CardContent>
-        </Card>
 
-        {error ? (
-          <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
-            <AlertCircle className="size-4" />
-            <AlertTitle>Couldn&apos;t update the embedded browser</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        ) : null}
+          </div>
+        </div>
+
+        <div className="min-w-0 border-l border-border/70 bg-transparent" />
       </section>
     </main>
   );
@@ -788,6 +998,10 @@ function formatActionLabel(action: PageActionRequest) {
   }
 
   return `Click ${action.elementId}.`;
+}
+
+function tabLabel(tab: BrowserTabState) {
+  return tab.pageTitle || tab.currentUrl || tab.requestedUrl || "New tab";
 }
 
 function getErrorMessage(error: unknown) {
