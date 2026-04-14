@@ -69,7 +69,8 @@ import {
   type TargetBrowserState,
 } from "./lib/targetBrowser";
 
-const DEFAULT_PROVIDER = (import.meta.env.VITE_LLM_PROVIDER ?? "openai") as ChatProvider;
+const DEFAULT_PROVIDER = (import.meta.env.VITE_LLM_PROVIDER ??
+  "openai") as ChatProvider;
 const TARGET_CHROME_HEIGHT_PX = 156;
 const LAYOUT_PRESET_LABELS: Record<LayoutPreset, string> = {
   "70-30": "70/30",
@@ -117,7 +118,9 @@ type ReviewDraft = {
 
 function App() {
   const [browser, setBrowser] = useState<TargetBrowserState | null>(null);
-  const [focusedAsset, setFocusedAsset] = useState<FocusedAssetContext | null>(null);
+  const [focusedAsset, setFocusedAsset] = useState<FocusedAssetContext | null>(
+    null,
+  );
   const [input, setInput] = useState("https://developer.mozilla.org");
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
@@ -125,8 +128,12 @@ function App() {
   const [provider, setProvider] = useState<ChatProvider>(DEFAULT_PROVIDER);
   const [submitting, setSubmitting] = useState(false);
   const [isResponding, setIsResponding] = useState(false);
-  const [pendingReview, setPendingReview] = useState<HumanReviewRequest | null>(null);
-  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>({});
+  const [pendingReview, setPendingReview] = useState<HumanReviewRequest | null>(
+    null,
+  );
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>(
+    {},
+  );
   const [messages, setMessages] = useState<TranscriptMessage[]>([
     {
       id: "assistant-intro",
@@ -181,11 +188,13 @@ function App() {
       setSubmitting(false);
     });
 
-    const unlistenFocusedAssetPromise = listenToFocusedAsset((nextFocusedAsset) => {
-      if (mounted) {
-        setFocusedAsset(nextFocusedAsset);
-      }
-    });
+    const unlistenFocusedAssetPromise = listenToFocusedAsset(
+      (nextFocusedAsset) => {
+        if (mounted) {
+          setFocusedAsset(nextFocusedAsset);
+        }
+      },
+    );
 
     return () => {
       mounted = false;
@@ -277,7 +286,9 @@ function App() {
 
     try {
       const nextState =
-        direction === "back" ? await navigateTargetBack() : await navigateTargetForward();
+        direction === "back"
+          ? await navigateTargetBack()
+          : await navigateTargetForward();
       setBrowser(nextState);
       setFocusedAsset(null);
     } catch (navigationError) {
@@ -345,11 +356,10 @@ function App() {
     setPendingReview(reply.review);
     setReviewDrafts((currentDrafts) => ({
       ...currentDrafts,
-      [reply.review.id]:
-        currentDrafts[reply.review.id] ?? {
-          actionJson: JSON.stringify(reply.review.proposedAction, null, 2),
-          feedback: "",
-        },
+      [reply.review.id]: currentDrafts[reply.review.id] ?? {
+        actionJson: JSON.stringify(reply.review.proposedAction, null, 2),
+        feedback: "",
+      },
     }));
     appendMessage({
       id: crypto.randomUUID(),
@@ -400,7 +410,9 @@ function App() {
     setError("");
 
     try {
-      const nextState = await setAssetPickerEnabled(!browser.assetPickerEnabled);
+      const nextState = await setAssetPickerEnabled(
+        !browser.assetPickerEnabled,
+      );
       setBrowser(nextState);
     } catch (pickerError) {
       setError(getErrorMessage(pickerError));
@@ -430,10 +442,17 @@ function App() {
               } satisfies HumanReviewDecision)
             : ({
                 type: "reject",
-                message: draftState?.feedback.trim() || "Rejected from the assistant panel.",
+                message:
+                  draftState?.feedback.trim() ||
+                  "Rejected from the assistant panel.",
               } satisfies HumanReviewDecision);
 
-      const response = await resumeHumanReview(review, decision, provider, threadId);
+      const response = await resumeHumanReview(
+        review,
+        decision,
+        provider,
+        threadId,
+      );
       setPendingReview(null);
       applyAgentReply(response);
     } catch (reviewError) {
@@ -451,7 +470,7 @@ function App() {
   }
 
   return (
-    <main className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(216,226,240,0.95),_rgba(243,246,249,0.85)_42%,_rgba(228,235,241,0.9)_100%)] text-foreground">
+    <main className="h-dvh min-h-0 overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(216,226,240,0.95),rgba(243,246,249,0.85)_42%,rgba(228,235,241,0.9)_100%) text-foreground">
       <section
         className="grid h-full w-full min-w-0 min-h-0"
         style={{
@@ -459,26 +478,33 @@ function App() {
           gridTemplateRows: `${TARGET_CHROME_HEIGHT_PX}px minmax(0, 1fr)`,
         }}
       >
-        <div className="row-span-2 min-h-0 min-w-0 border-r border-border/80 bg-background/88">
-          <div className="flex h-full min-h-0 min-w-0 flex-col gap-4 p-4 lg:p-5">
+        <div className="row-span-2 min-h-0 min-w-0 overflow-hidden border-r border-border/80 bg-background/88">
+          <div className="flex h-full min-h-0 min-w-0 flex-col gap-4 overflow-hidden p-4 lg:p-5">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h1 className="m-0 text-[1.45rem] leading-none font-semibold tracking-[-0.05em] text-foreground lg:text-[2rem]">
+                <h1 className="m-0 pt-2 text-[1.45rem] leading-none font-semibold tracking-[-0.05em] text-foreground lg:text-[2rem]">
                   Sidekick page chat
                 </h1>
                 <p className="mt-2 mb-0 text-sm text-muted-foreground">
-                  Chat and reasoning stay on the left while browser controls now live beside the active page.
+                  Chat and reasoning stay on the left while browser controls now
+                  live beside the active page.
                 </p>
               </div>
 
-              <div className="flex min-w-[220px] items-center gap-2">
-                <Label htmlFor="provider-select" className="text-sm font-medium text-muted-foreground">
+              <div className="flex min-w-55 items-center gap-2">
+                <Label
+                  htmlFor="provider-select"
+                  className="text-sm font-medium text-muted-foreground"
+                >
                   Provider
                 </Label>
-                <Select value={provider} onValueChange={(value) => setProvider(value as ChatProvider)}>
+                <Select
+                  value={provider}
+                  onValueChange={(value) => setProvider(value as ChatProvider)}
+                >
                   <SelectTrigger
                     id="provider-select"
-                    className="h-10 w-[160px] border-border bg-card px-3 text-foreground"
+                    className="h-10 w-40 border-border bg-card px-3 text-foreground"
                   >
                     <SelectValue placeholder="Choose provider" />
                   </SelectTrigger>
@@ -498,10 +524,12 @@ function App() {
                       Current page context
                     </p>
                     <p className="mt-1 text-sm font-semibold text-card-foreground">
-                      {browser?.pageTitle || "Page title will appear after the first inspection"}
+                      {browser?.pageTitle ||
+                        "Page title will appear after the first inspection"}
                     </p>
-                    <p className="mt-1 break-words text-[0.82rem] text-muted-foreground">
-                      {browser?.currentUrl ?? "Waiting for the native webview to load"}
+                    <p className="mt-1 wrap-break-words text-[0.82rem] text-muted-foreground">
+                      {browser?.currentUrl ??
+                        "Waiting for the native webview to load"}
                     </p>
                   </div>
 
@@ -512,17 +540,26 @@ function App() {
 
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {focusedAsset?.element ? (
-                    <Badge variant="outline" className="rounded-none border-border px-3 py-1 text-xs">
+                    <Badge
+                      variant="outline"
+                      className="rounded-none border-border px-3 py-1 text-xs"
+                    >
                       Selected: {summarizeFocusedAsset(focusedAsset)}
                     </Badge>
                   ) : (
-                    <Badge variant="outline" className="rounded-none border-dashed px-3 py-1 text-xs">
+                    <Badge
+                      variant="outline"
+                      className="rounded-none border-dashed px-3 py-1 text-xs"
+                    >
                       No asset selected
                     </Badge>
                   )}
 
                   {activeTab ? (
-                    <Badge variant="outline" className="rounded-none border-border px-3 py-1 text-xs">
+                    <Badge
+                      variant="outline"
+                      className="rounded-none border-border px-3 py-1 text-xs"
+                    >
                       Active tab: {tabLabel(activeTab)}
                     </Badge>
                   ) : null}
@@ -531,8 +568,8 @@ function App() {
             </Card>
 
             <Card className="rounded-none flex min-h-0 flex-1 flex-col border border-border/80 bg-card/85 shadow-sm">
-              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 p-4">
-                <div className="flex min-h-[260px] flex-1 flex-col gap-3 overflow-y-auto border border-border bg-muted/30 p-3">
+              <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-4">
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto border border-border bg-muted/30 p-3">
                   {messages.map((message) => (
                     <article
                       key={message.id}
@@ -553,7 +590,9 @@ function App() {
                         )}
                       </div>
 
-                      <p className="m-0 whitespace-pre-wrap leading-6">{message.content}</p>
+                      <p className="m-0 whitespace-pre-wrap leading-6">
+                        {message.content}
+                      </p>
 
                       {message.type === "action" ? (
                         <div className="mt-3 border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
@@ -562,11 +601,15 @@ function App() {
                           </p>
                           <p className="mt-1 m-0">
                             {message.action.success ? "Completed" : "Failed"} on{" "}
-                            {message.action.browser.pageTitle || message.action.browser.currentUrl}
+                            {message.action.browser.pageTitle ||
+                              message.action.browser.currentUrl}
                           </p>
                           {message.action.focusedAsset?.element ? (
                             <p className="mt-1 m-0">
-                              Focused asset: {summarizeFocusedAsset(message.action.focusedAsset)}
+                              Focused asset:{" "}
+                              {summarizeFocusedAsset(
+                                message.action.focusedAsset,
+                              )}
                             </p>
                           ) : null}
                         </div>
@@ -607,7 +650,8 @@ function App() {
 
                 <form className="grid gap-3" onSubmit={handleChatSubmit}>
                   <Label htmlFor={draftId} className="text-muted-foreground">
-                    Ask about the page, the selected asset, or tell Sidekick what to do next
+                    Ask about the page, the selected asset, or tell Sidekick
+                    what to do next
                   </Label>
                   <Textarea
                     id={draftId}
@@ -625,7 +669,8 @@ function App() {
                       </p>
                       {pendingReview ? (
                         <p className="m-0 text-xs text-amber-700">
-                          Resolve the pending review card before sending another request.
+                          Resolve the pending review card before sending another
+                          request.
                         </p>
                       ) : null}
                     </div>
@@ -633,7 +678,11 @@ function App() {
                       type="submit"
                       size="lg"
                       className="h-11 rounded-none bg-primary text-sm font-semibold text-primary-foreground shadow-[0_10px_24px_rgba(32,78,74,0.25)] hover:bg-primary/90"
-                      disabled={isResponding || pendingReview !== null || draft.trim().length === 0}
+                      disabled={
+                        isResponding ||
+                        pendingReview !== null ||
+                        draft.trim().length === 0
+                      }
                     >
                       {isResponding ? (
                         <>
@@ -651,9 +700,14 @@ function App() {
                 </form>
 
                 {agentError ? (
-                  <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
+                  <Alert
+                    variant="destructive"
+                    className="border-destructive/20 bg-destructive/5"
+                  >
                     <AlertCircle className="size-4" />
-                    <AlertTitle>Couldn&apos;t complete the grounded step</AlertTitle>
+                    <AlertTitle>
+                      Couldn&apos;t complete the grounded step
+                    </AlertTitle>
                     <AlertDescription>{agentError}</AlertDescription>
                   </Alert>
                 ) : null}
@@ -672,7 +726,9 @@ function App() {
                     <Button
                       key={preset}
                       type="button"
-                      variant={preset === activeLayoutPreset ? "default" : "outline"}
+                      variant={
+                        preset === activeLayoutPreset ? "default" : "outline"
+                      }
                       className="h-11 rounded-none text-sm font-semibold"
                       onClick={() => {
                         void handleLayoutPresetChange(preset);
@@ -683,15 +739,21 @@ function App() {
                   ))}
                 </div>
                 <p className="m-0 text-xs text-muted-foreground">
-                  The app shell now spans the full window so the right pane can carry its own browser chrome.
+                  The app shell now spans the full window so the right pane can
+                  carry its own browser chrome.
                 </p>
               </CardContent>
             </Card>
 
             {error ? (
-              <Alert variant="destructive" className="border-destructive/20 bg-destructive/5">
+              <Alert
+                variant="destructive"
+                className="border-destructive/20 bg-destructive/5"
+              >
                 <AlertCircle className="size-4" />
-                <AlertTitle>Couldn&apos;t update the embedded browser</AlertTitle>
+                <AlertTitle>
+                  Couldn&apos;t update the embedded browser
+                </AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             ) : null}
@@ -722,11 +784,14 @@ function App() {
                         }}
                       >
                         <Globe className="size-4 shrink-0" />
-                        <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>
+                        <span className="min-w-0 flex-1 truncate">
+                          {tabLabel(tab)}
+                        </span>
                         <span
                           className={cn(
                             "inline-flex shrink-0 items-center justify-center rounded-full p-1 opacity-70 transition hover:opacity-100",
-                            browser.tabs.length <= 1 && "pointer-events-none opacity-30",
+                            browser.tabs.length <= 1 &&
+                              "pointer-events-none opacity-30",
                           )}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -794,7 +859,10 @@ function App() {
                 <RefreshCcw className="size-4" />
               </Button>
 
-              <form className="flex min-w-0 flex-1 items-center gap-2" onSubmit={handleNavigateSubmit}>
+              <form
+                className="flex min-w-0 flex-1 items-center gap-2"
+                onSubmit={handleNavigateSubmit}
+              >
                 <Input
                   id="target-url"
                   className="h-10 rounded-none border-border bg-white/88 text-foreground"
@@ -832,7 +900,6 @@ function App() {
                 )}
               </Button>
             </div>
-
           </div>
         </div>
 
@@ -850,7 +917,13 @@ type ReviewCardProps = {
   onDecision: (decision: HumanReviewDecision["type"]) => void;
 };
 
-function ReviewCard({ review, draft, disabled, onDraftChange, onDecision }: ReviewCardProps) {
+function ReviewCard({
+  review,
+  draft,
+  disabled,
+  onDraftChange,
+  onDecision,
+}: ReviewCardProps) {
   const canEdit = review.allowedDecisions.includes("edit");
   const canReject = review.allowedDecisions.includes("reject");
 
@@ -872,7 +945,10 @@ function ReviewCard({ review, draft, disabled, onDraftChange, onDecision }: Revi
           </Label>
           <Textarea
             className="min-h-28 rounded-none border-amber-200 bg-white text-xs"
-            value={draft?.actionJson ?? JSON.stringify(review.proposedAction, null, 2)}
+            value={
+              draft?.actionJson ??
+              JSON.stringify(review.proposedAction, null, 2)
+            }
             onChange={(event) =>
               onDraftChange({
                 actionJson: event.currentTarget.value,
@@ -894,7 +970,9 @@ function ReviewCard({ review, draft, disabled, onDraftChange, onDecision }: Revi
             value={draft?.feedback ?? ""}
             onChange={(event) =>
               onDraftChange({
-                actionJson: draft?.actionJson ?? JSON.stringify(review.proposedAction, null, 2),
+                actionJson:
+                  draft?.actionJson ??
+                  JSON.stringify(review.proposedAction, null, 2),
                 feedback: event.currentTarget.value,
               })
             }
@@ -944,7 +1022,11 @@ export default App;
 
 function parsePageActionRequest(rawValue: string): PageActionRequest {
   const parsed = JSON.parse(rawValue) as Partial<PageActionRequest> | null;
-  if (!parsed || typeof parsed !== "object" || typeof parsed.kind !== "string") {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    typeof parsed.kind !== "string"
+  ) {
     throw new Error("The edited action JSON is invalid.");
   }
 
