@@ -13,6 +13,13 @@
     "windows": [
       {
         "title": "sidekick",
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 12,
+          "y": 16
+        },
         "width": 1280,
         "height": 820,
         "minWidth": 1068,
