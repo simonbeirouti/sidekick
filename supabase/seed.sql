@@ -1,0 +1,2 @@
+-- Local seed data placeholder.
+-- Keep this file so `supabase db reset --local` can run without additional fixtures.

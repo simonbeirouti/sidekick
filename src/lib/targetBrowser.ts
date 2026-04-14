@@ -93,6 +93,14 @@ export type PageActionResult = {
 const TARGET_BROWSER_EVENT = "target-browser://state-changed";
 const TARGET_ASSET_EVENT = "target-browser://focused-asset-changed";
 
+export function activateWorkspaceShell() {
+  return invoke<TargetBrowserState>("activate_workspace_shell");
+}
+
+export function deactivateWorkspaceShell() {
+  return invoke<void>("deactivate_workspace_shell");
+}
+
 export function getTargetBrowserState() {
   return invoke<TargetBrowserState>("get_target_browser_state");
 }

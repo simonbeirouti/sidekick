@@ -1,16 +1,21 @@
 use std::{
+    env,
     sync::{Condvar, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use supabase_client_sdk::prelude::{
+    Session as SupabaseSession, SupabaseClient, SupabaseClientAuthExt, SupabaseClientQueryExt,
+    SupabaseConfig, User as SupabaseUser,
+};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent,
 };
 
 const MAIN_WINDOW_LABEL: &str = "main";
-const MAIN_WEBVIEW_LABEL: &str = "main";
 const DEFAULT_TARGET_URL: &str = "https://developer.mozilla.org/en-US/docs/Web/API/WebView";
 const MIN_WINDOW_WIDTH: f64 = 1068.0;
 const MIN_ASSISTANT_PANEL_WIDTH: f64 = 320.0;
@@ -22,6 +27,9 @@ const TARGET_WEBVIEW_LABEL_PREFIX: &str = "target-webview-";
 const DEFAULT_TARGET_TAB_TITLE: &str = "New tab";
 const PAGE_SNAPSHOT_TIMEOUT_MS: u64 = 5_000;
 const PAGE_ACTION_TIMEOUT_MS: u64 = 5_000;
+const LOCAL_SUPABASE_URL: &str = "http://127.0.0.1:64321";
+const LOCAL_SUPABASE_PUBLISHABLE_KEY: &str = "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH";
+const LOCAL_SUPABASE_SECRET_KEY: &str = "sb_secret_N7UND0UgjKTVK-Uodkm0Hg_xSvEMPvz";
 
 const DOM_BRIDGE_BOOTSTRAP: &str = r#"
 const BRIDGE_KEY = "__SIDEKICK_BRIDGE__";
@@ -668,6 +676,92 @@ struct PageActionResult {
     focused_asset: Option<FocusedAssetContext>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthSession {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+    expires_at: Option<i64>,
+    token_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthUser {
+    id: String,
+    email: Option<String>,
+    role: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+    user_metadata: Option<JsonMap<String, JsonValue>>,
+    app_metadata: Option<JsonMap<String, JsonValue>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthState {
+    session: AuthSession,
+    user: AuthUser,
+}
+
+impl From<SupabaseSession> for AuthSession {
+    fn from(session: SupabaseSession) -> Self {
+        Self {
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires_in: session.expires_in,
+            expires_at: session.expires_at,
+            token_type: session.token_type,
+        }
+    }
+}
+
+impl From<AuthSession> for SupabaseSession {
+    fn from(session: AuthSession) -> Self {
+        Self {
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires_in: session.expires_in,
+            expires_at: session.expires_at,
+            token_type: session.token_type,
+            user: SupabaseUser {
+                id: String::new(),
+                aud: None,
+                role: None,
+                email: None,
+                phone: None,
+                email_confirmed_at: None,
+                phone_confirmed_at: None,
+                confirmation_sent_at: None,
+                recovery_sent_at: None,
+                last_sign_in_at: None,
+                created_at: None,
+                updated_at: None,
+                user_metadata: None,
+                app_metadata: None,
+                identities: None,
+                factors: None,
+                is_anonymous: None,
+            },
+        }
+    }
+}
+
+impl From<SupabaseUser> for AuthUser {
+    fn from(user: SupabaseUser) -> Self {
+        Self {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            created_at: user.created_at.map(|value| value.to_rfc3339()),
+            updated_at: user.updated_at.map(|value| value.to_rfc3339()),
+            user_metadata: json_value_to_map(user.user_metadata),
+            app_metadata: json_value_to_map(user.app_metadata),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("{0}")]
@@ -689,8 +783,6 @@ impl Serialize for AppError {
 
 #[derive(Clone, Copy, Debug)]
 struct PaneLayout {
-    assistant_position: LogicalPosition<f64>,
-    assistant_size: LogicalSize<f64>,
     target_position: LogicalPosition<f64>,
     target_size: LogicalSize<f64>,
 }
@@ -720,8 +812,10 @@ fn navigate_target(
 
 #[tauri::command]
 fn get_target_browser_state(
+    app: AppHandle,
     state: State<'_, BrowserState>,
 ) -> Result<TargetBrowserState, AppError> {
+    ensure_active_target_webview(&app, state.inner())?;
     snapshot_state(state.inner())
 }
 
@@ -731,6 +825,7 @@ fn get_target_page_snapshot(
     browser_state: State<'_, BrowserState>,
     capture_state: State<'_, SnapshotCaptureState>,
 ) -> Result<TargetPageSnapshot, AppError> {
+    ensure_active_target_webview(&app, browser_state.inner())?;
     capture_page_snapshot(&app, browser_state.inner(), capture_state.inner())
 }
 
@@ -739,6 +834,26 @@ fn get_focused_asset_context(
     browser_state: State<'_, BrowserState>,
 ) -> Result<Option<FocusedAssetContext>, AppError> {
     Ok(browser_state.focused_asset.lock().unwrap().clone())
+}
+
+#[tauri::command]
+fn activate_workspace_shell(
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<TargetBrowserState, AppError> {
+    ensure_active_target_webview(&app, state.inner())?;
+    emit_browser_state(&app, state.inner())
+}
+
+#[tauri::command]
+fn deactivate_workspace_shell(
+    app: AppHandle,
+    state: State<'_, BrowserState>,
+) -> Result<(), AppError> {
+    close_all_target_webviews(&app, state.inner())?;
+    reset_browser_state(state.inner());
+    update_webview_layouts(&app)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -985,19 +1100,147 @@ fn perform_page_action(
     })
 }
 
+#[tauri::command]
+async fn auth_sign_in_with_password(email: String, password: String) -> Result<AuthState, AppError> {
+    let auth = create_supabase_auth_client(false)?;
+    let session = auth
+        .sign_in_with_password_email(email.trim(), password.trim())
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+
+    Ok(build_auth_state(session.user.clone(), session))
+}
+
+#[tauri::command]
+async fn auth_sign_up_with_password(
+    email: String,
+    password: String,
+    display_name: Option<String>,
+) -> Result<AuthState, AppError> {
+    let auth = create_supabase_auth_client(false)?;
+    let trimmed_email = email.trim().to_string();
+    let trimmed_password = password.trim().to_string();
+    let trimmed_display_name = display_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let response = if let Some(display_name) = trimmed_display_name {
+        auth.sign_up_with_email_and_data(
+            &trimmed_email,
+            &trimmed_password,
+            Some(json!({ "display_name": display_name })),
+        )
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?
+    } else {
+        auth.sign_up_with_email(&trimmed_email, &trimmed_password)
+            .await
+            .map_err(|error| AppError::Message(error.to_string()))?
+    };
+
+    if let Some(session) = response.session {
+        return Ok(build_auth_state(session.user.clone(), session));
+    }
+
+    let session = auth
+        .sign_in_with_password_email(&trimmed_email, &trimmed_password)
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+
+    Ok(build_auth_state(session.user.clone(), session))
+}
+
+#[tauri::command]
+async fn auth_restore_session(session: AuthSession) -> Result<AuthState, AppError> {
+    let auth = create_supabase_auth_client(false)?;
+    auth.set_session(session.into()).await;
+
+    match auth.refresh_current_session().await {
+        Ok(refreshed_session) => Ok(build_auth_state(
+            refreshed_session.user.clone(),
+            refreshed_session,
+        )),
+        Err(refresh_error) => {
+            let current_session = auth
+                .get_session()
+                .await
+                .ok_or_else(|| AppError::Message("No stored session was found.".into()))?;
+            let user = auth.get_session_user().await.map_err(|_| {
+                AppError::Message(format!(
+                    "Could not restore the stored session: {refresh_error}"
+                ))
+            })?;
+
+            Ok(build_auth_state(user, current_session))
+        }
+    }
+}
+
+#[tauri::command]
+async fn auth_sign_out(session: AuthSession) -> Result<(), AppError> {
+    let auth = create_supabase_auth_client(false)?;
+    auth.set_session(session.into()).await;
+    auth.sign_out_current()
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn auth_delete_current_account(session: AuthSession) -> Result<(), AppError> {
+    let auth = create_supabase_auth_client(false)?;
+    auth.set_session(session.into()).await;
+
+    let current_user = auth
+        .get_session_user()
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+    let user_id = current_user.id.clone();
+    let deleted_at = current_iso_timestamp();
+
+    let _ = auth.sign_out_current().await;
+
+    let service_client = create_supabase_rest_client(true)?;
+    let service_auth = create_supabase_auth_client(true)?;
+
+    service_client
+        .rpc(
+            "soft_delete_sidekick_account",
+            json!({
+                "target_user_id": user_id.clone(),
+                "target_deleted_at": deleted_at,
+            }),
+        )
+        .map_err(|error| AppError::Message(error.to_string()))?
+        .execute()
+        .await
+        .into_result()
+        .map_err(|error| AppError::Message(error.to_string()))?;
+
+    service_auth
+        .admin()
+        .delete_user_with_options(&user_id, true)
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_store::Builder::new().build())
         .manage(BrowserState::default())
         .manage(SnapshotCaptureState::default())
         .manage(ActionExecutionState::default())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            create_initial_target_webview(app.handle())?;
             register_resize_handler(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            activate_workspace_shell,
+            deactivate_workspace_shell,
             navigate_target,
             get_target_browser_state,
             get_target_page_snapshot,
@@ -1013,7 +1256,12 @@ pub fn run() {
             submit_page_action_result,
             set_layout_preset,
             set_asset_picker_enabled,
-            perform_page_action
+            perform_page_action,
+            auth_sign_in_with_password,
+            auth_sign_up_with_password,
+            auth_restore_session,
+            auth_sign_out,
+            auth_delete_current_account
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1025,6 +1273,8 @@ fn register_resize_handler(app: &AppHandle) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Message("Main window was not found.".into()))?;
     let resize_handle = app.clone();
 
+    update_webview_layouts(app)?;
+
     main_window.on_window_event(move |event| {
         if matches!(
             event,
@@ -1035,12 +1285,6 @@ fn register_resize_handler(app: &AppHandle) -> Result<(), AppError> {
     });
 
     Ok(())
-}
-
-fn create_initial_target_webview(app: &AppHandle) -> Result<(), AppError> {
-    let state = app.state::<BrowserState>();
-    let active_tab = active_tab(state.inner())?;
-    create_target_webview_for_tab(app, &active_tab.id, &active_tab.current_url)
 }
 
 fn create_target_webview_for_tab(app: &AppHandle, tab_id: &str, url: &str) -> Result<(), AppError> {
@@ -1103,17 +1347,11 @@ fn update_webview_layouts(app: &AppHandle) -> Result<(), AppError> {
     let main_window = app
         .get_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| AppError::Message("Main window was not found.".into()))?;
-    let assistant_webview = app
-        .get_webview(MAIN_WEBVIEW_LABEL)
-        .ok_or_else(|| AppError::Message("Assistant webview was not found.".into()))?;
 
     let state = app.state::<BrowserState>();
     let layout = layout_for_window(&main_window, state.inner())?;
     let active_tab_id = active_tab_id(state.inner());
     let tabs = state.tabs.lock().unwrap().clone();
-
-    assistant_webview.set_position(layout.assistant_position)?;
-    assistant_webview.set_size(layout.assistant_size)?;
 
     for tab in tabs {
         if let Some(webview) = app.get_webview(&build_target_webview_label(&tab.id)) {
@@ -1128,6 +1366,34 @@ fn update_webview_layouts(app: &AppHandle) -> Result<(), AppError> {
     }
 
     Ok(())
+}
+
+fn ensure_active_target_webview(app: &AppHandle, state: &BrowserState) -> Result<(), AppError> {
+    let active_tab = active_tab(state)?;
+    create_target_webview_for_tab(app, &active_tab.id, &active_tab.current_url)
+}
+
+fn close_all_target_webviews(app: &AppHandle, state: &BrowserState) -> Result<(), AppError> {
+    let tabs = state.tabs.lock().unwrap().clone();
+
+    for tab in tabs {
+        if let Some(webview) = app.get_webview(&build_target_webview_label(&tab.id)) {
+            webview.close()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn reset_browser_state(state: &BrowserState) {
+    let initial_tab = new_browser_tab("tab-1".into(), DEFAULT_TARGET_URL.to_string());
+
+    *state.tabs.lock().unwrap() = vec![initial_tab.clone()];
+    *state.active_tab_id.lock().unwrap() = initial_tab.id;
+    *state.next_tab_index.lock().unwrap() = 2;
+    *state.layout_preset.lock().unwrap() = LayoutPreset::default();
+    *state.asset_picker_enabled.lock().unwrap() = false;
+    *state.focused_asset.lock().unwrap() = None;
 }
 
 fn layout_for_window(window: &tauri::Window, state: &BrowserState) -> Result<PaneLayout, AppError> {
@@ -1159,8 +1425,6 @@ fn layout_for_size(
     }
 
     Ok(PaneLayout {
-        assistant_position: LogicalPosition::new(0.0, 0.0),
-        assistant_size: LogicalSize::new(inner_size.width, inner_size.height),
         target_position: LogicalPosition::new(assistant_width, TARGET_CHROME_HEIGHT),
         target_size: LogicalSize::new(target_width, target_height),
     })
@@ -1641,6 +1905,69 @@ fn build_page_action_script(
         "#,
         bootstrap = DOM_BRIDGE_BOOTSTRAP,
     ))
+}
+
+fn resolve_supabase_value(primary_key: &str, fallback_key: &str, default: &str) -> String {
+    env::var(primary_key)
+        .or_else(|_| env::var(fallback_key))
+        .unwrap_or_else(|_| default.to_string())
+}
+
+fn supabase_url() -> String {
+    resolve_supabase_value("SIDEKICK_SUPABASE_URL", "SUPABASE_URL", LOCAL_SUPABASE_URL)
+}
+
+fn supabase_publishable_key() -> String {
+    resolve_supabase_value(
+        "SIDEKICK_SUPABASE_PUBLISHABLE_KEY",
+        "SUPABASE_PUBLISHABLE_KEY",
+        LOCAL_SUPABASE_PUBLISHABLE_KEY,
+    )
+}
+
+fn supabase_secret_key() -> String {
+    resolve_supabase_value(
+        "SIDEKICK_SUPABASE_SECRET_KEY",
+        "SUPABASE_SECRET_KEY",
+        LOCAL_SUPABASE_SECRET_KEY,
+    )
+}
+
+fn create_supabase_rest_client(use_secret_key: bool) -> Result<SupabaseClient, AppError> {
+    let key = if use_secret_key {
+        supabase_secret_key()
+    } else {
+        supabase_publishable_key()
+    };
+
+    SupabaseClient::new(SupabaseConfig::new(supabase_url(), key))
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
+fn create_supabase_auth_client(
+    use_secret_key: bool,
+) -> Result<supabase_client_sdk::prelude::AuthClient, AppError> {
+    create_supabase_rest_client(use_secret_key)?
+        .auth()
+        .map_err(|error| AppError::Message(error.to_string()))
+}
+
+fn current_iso_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn json_value_to_map(value: Option<JsonValue>) -> Option<JsonMap<String, JsonValue>> {
+    match value {
+        Some(JsonValue::Object(map)) => Some(map),
+        _ => None,
+    }
+}
+
+fn build_auth_state(user: SupabaseUser, session: SupabaseSession) -> AuthState {
+    AuthState {
+        session: AuthSession::from(session),
+        user: AuthUser::from(user),
+    }
 }
 
 fn unix_timestamp() -> String {

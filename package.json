@@ -8,7 +8,12 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "supabase:start": "sh ./supabase/scripts/start-local.sh",
+    "supabase:stop": "sh ./supabase/scripts/stop-local.sh",
+    "supabase:reset": "sh ./supabase/scripts/reset-local.sh",
+    "supabase:status": "sh ./supabase/scripts/status-local.sh",
+    "supabase:env": "sh ./supabase/scripts/status-env.sh"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
@@ -20,6 +25,7 @@
     "@tailwindcss/vite": "^4.2.2",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-store": "~2.4.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
